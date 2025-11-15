@@ -18,7 +18,7 @@ from tqdm import tqdm
 from typing import Dict, List, Tuple
 
 from envs import Simple3DNavEnv
-from models import WorldModel
+from models import WorldModel, EnsembleWorldModel
 import config
 
 
@@ -60,6 +60,7 @@ class WorldModelEvaluator:
             Dictionary of metrics and trajectories
         """
         horizon = len(actions)
+        is_ensemble = isinstance(self.world_model, EnsembleWorldModel)
 
         # Ground truth rollout
         true_obs = [initial_obs]
@@ -82,19 +83,38 @@ class WorldModelEvaluator:
             model_obs = [initial_obs]
             model_rewards = []
 
+            # For ensemble, track uncertainty
+            if is_ensemble:
+                model_obs_std = []
+                model_rewards_std = []
+
             obs_tensor = torch.from_numpy(initial_obs).float().to(self.device)
 
             for action in actions:
                 action_tensor = torch.from_numpy(action).float().to(self.device)
 
-                # Predict next state and reward
-                next_obs_pred, reward_pred = self.world_model(
-                    obs_tensor.unsqueeze(0),
-                    action_tensor.unsqueeze(0)
-                )
+                if is_ensemble:
+                    # Get mean and std from ensemble
+                    (next_obs_mean, next_obs_std), (reward_mean, reward_std) = self.world_model(
+                        obs_tensor.unsqueeze(0),
+                        action_tensor.unsqueeze(0),
+                        reduce="mean_std"
+                    )
 
-                next_obs_pred = next_obs_pred.squeeze(0)
-                reward_pred = reward_pred.item()
+                    next_obs_pred = next_obs_mean.squeeze(0)
+                    reward_pred = reward_mean.item()
+
+                    model_obs_std.append(next_obs_std.squeeze(0).cpu().numpy())
+                    model_rewards_std.append(reward_std.item())
+                else:
+                    # Single model prediction
+                    next_obs_pred, reward_pred = self.world_model(
+                        obs_tensor.unsqueeze(0),
+                        action_tensor.unsqueeze(0)
+                    )
+
+                    next_obs_pred = next_obs_pred.squeeze(0)
+                    reward_pred = reward_pred.item()
 
                 model_obs.append(next_obs_pred.cpu().numpy())
                 model_rewards.append(reward_pred)
@@ -128,7 +148,7 @@ class WorldModelEvaluator:
         true_success = true_final_dist < self.env.goal_radius
         model_success = model_final_dist < self.env.goal_radius
 
-        return {
+        result = {
             "true_obs": true_obs,
             "model_obs": model_obs,
             "true_rewards": true_rewards,
@@ -142,6 +162,24 @@ class WorldModelEvaluator:
             "success_match": true_success == model_success,
             "horizon": horizon,
         }
+
+        # Add ensemble uncertainty metrics if available
+        if is_ensemble:
+            model_obs_std = np.stack(model_obs_std)
+            model_rewards_std = np.array(model_rewards_std)
+
+            result["model_obs_std"] = model_obs_std
+            result["model_rewards_std"] = model_rewards_std
+
+            # Compute uncertainty correlation with error
+            uncertainty_error_corr = np.corrcoef(
+                model_obs_std.mean(axis=-1),
+                obs_errors
+            )[0, 1]
+
+            result["uncertainty_error_correlation"] = uncertainty_error_corr
+
+        return result
 
     def evaluate_episodes(
         self,
@@ -240,7 +278,7 @@ class WorldModelEvaluator:
         model_final_dists = [m["model_final_dist"] for m in metrics_list]
         success_matches = [m["success_match"] for m in metrics_list]
 
-        return {
+        aggregated = {
             "horizon": horizon,
             "num_episodes": len(metrics_list),
             "mean_obs_error": mean_obs_error,
@@ -257,6 +295,27 @@ class WorldModelEvaluator:
             "true_final_dist_mean": np.mean(true_final_dists),
             "model_final_dist_mean": np.mean(model_final_dists),
         }
+
+        # Aggregate ensemble uncertainty metrics if available
+        if "model_obs_std" in metrics_list[0]:
+            obs_uncertainties = np.stack([m["model_obs_std"] for m in metrics_list])
+            reward_uncertainties = np.stack([m["model_rewards_std"] for m in metrics_list])
+
+            mean_obs_uncertainty = obs_uncertainties.mean(axis=0).mean(axis=-1)
+            mean_reward_uncertainty = reward_uncertainties.mean(axis=0)
+
+            # Uncertainty-error correlations
+            uncertainty_corrs = [m["uncertainty_error_correlation"] for m in metrics_list
+                                if not np.isnan(m["uncertainty_error_correlation"])]
+
+            aggregated["mean_obs_uncertainty"] = mean_obs_uncertainty
+            aggregated["mean_reward_uncertainty"] = mean_reward_uncertainty
+            aggregated["mean_uncertainty_error_correlation"] = np.mean(uncertainty_corrs) if uncertainty_corrs else 0.0
+            aggregated["is_ensemble"] = True
+        else:
+            aggregated["is_ensemble"] = False
+
+        return aggregated
 
     def plot_results(self, metrics: Dict, save_dir: Path):
         """Generate evaluation plots."""
@@ -327,14 +386,26 @@ class WorldModelEvaluator:
         ax.grid(True)
         ax.legend()
 
-        # Plot 5: Error growth rate
+        # Plot 5: Error growth rate OR Uncertainty vs Error
         ax = axes[1, 1]
-        error_growth = metrics["mean_obs_error"] / metrics["mean_obs_error"][0]
-        ax.plot(timesteps, error_growth, 'purple')
-        ax.set_xlabel("Timestep")
-        ax.set_ylabel("Relative Error Growth")
-        ax.set_title("Error Growth Factor (relative to t=1)")
-        ax.grid(True)
+        if metrics.get("is_ensemble", False):
+            # Plot uncertainty vs error correlation for ensemble
+            ax.plot(timesteps, metrics["mean_obs_uncertainty"], 'purple', label='Uncertainty')
+            ax2 = ax.twinx()
+            ax2.plot(timesteps, metrics["mean_obs_error"], 'orange', label='Error')
+            ax.set_xlabel("Timestep")
+            ax.set_ylabel("Model Uncertainty", color='purple')
+            ax2.set_ylabel("Prediction Error", color='orange')
+            ax.set_title(f"Uncertainty vs Error (ρ={metrics.get('mean_uncertainty_error_correlation', 0):.2f})")
+            ax.grid(True)
+        else:
+            # Regular error growth plot
+            error_growth = metrics["mean_obs_error"] / metrics["mean_obs_error"][0]
+            ax.plot(timesteps, error_growth, 'purple')
+            ax.set_xlabel("Timestep")
+            ax.set_ylabel("Relative Error Growth")
+            ax.set_title("Error Growth Factor (relative to t=1)")
+            ax.grid(True)
 
         # Plot 6: Summary statistics
         ax = axes[1, 2]
@@ -430,33 +501,78 @@ def main():
         default=str(config.LOGS_DIR / "evaluation"),
         help="Output directory for results"
     )
+    parser.add_argument(
+        "--use_ensemble",
+        action="store_true",
+        default=config.MODEL_CONFIG.get("use_ensemble", False),
+        help="Use ensemble world model"
+    )
+    parser.add_argument(
+        "--ensemble_size",
+        type=int,
+        default=config.MODEL_CONFIG.get("ensemble_size", 5),
+        help="Number of ensemble members"
+    )
 
     args = parser.parse_args()
-
-    # Check if model exists
-    if not Path(args.model_path).exists():
-        print(f"Error: Model not found at {args.model_path}")
-        print("Please train the model first: python training/train_world_model.py")
-        return
-
-    # Load model
-    print(f"Loading model from {args.model_path}...")
-    checkpoint = torch.load(args.model_path, map_location=args.device)
 
     # Create environment
     env = Simple3DNavEnv(**config.ENV_CONFIG)
 
-    # Create world model
+    # Get dimensions
     obs_dim = env.observation_space_shape[0]
     action_dim = env.action_space_shape[0]
 
-    world_model = WorldModel(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        **config.MODEL_CONFIG["world_model"],
-    )
-    world_model.load_state_dict(checkpoint["model_state_dict"])
-    print(f"Loaded model from epoch {checkpoint['epoch']}")
+    # Create and load world model
+    if args.use_ensemble:
+        # Load ensemble model
+        print(f"Loading ensemble model with {args.ensemble_size} members...")
+
+        # Create ensemble model
+        world_model = EnsembleWorldModel(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            ensemble_size=args.ensemble_size,
+            **config.MODEL_CONFIG["world_model"],
+        )
+
+        # Load each member
+        members_loaded = 0
+        for member_idx in range(args.ensemble_size):
+            member_path = config.WEIGHTS_DIR / f"world_model_member_{member_idx}.pt"
+            if member_path.exists():
+                checkpoint = torch.load(member_path, map_location=args.device)
+                world_model.models[member_idx].load_state_dict(checkpoint["model_state_dict"])
+                members_loaded += 1
+                print(f"  Loaded member {member_idx} from {member_path}")
+            else:
+                print(f"  Warning: Member {member_idx} not found at {member_path}")
+
+        if members_loaded == 0:
+            print("Error: No ensemble members found!")
+            print("Please train the ensemble model first: python training/train_world_model.py --use_ensemble")
+            return
+
+        if members_loaded < args.ensemble_size:
+            print(f"Warning: Only {members_loaded}/{args.ensemble_size} members loaded")
+    else:
+        # Load single model
+        if not Path(args.model_path).exists():
+            print(f"Error: Model not found at {args.model_path}")
+            print("Please train the model first: python training/train_world_model.py")
+            return
+
+        print(f"Loading model from {args.model_path}...")
+        checkpoint = torch.load(args.model_path, map_location=args.device)
+
+        # Create single world model
+        world_model = WorldModel(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            **config.MODEL_CONFIG["world_model"],
+        )
+        world_model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Loaded model from epoch {checkpoint['epoch']}")
 
     # Create evaluator
     evaluator = WorldModelEvaluator(env, world_model, device=args.device)
@@ -498,12 +614,20 @@ def main():
     print(f"Episodes evaluated: {metrics['num_episodes']}")
     print(f"Horizon: {metrics['horizon']}")
     print(f"Policy: {args.policy}")
+    print(f"Model type: {'Ensemble' if args.use_ensemble else 'Single'}")
     print("\nKey Metrics:")
     print(f"  Mean final observation error: {metrics['mean_final_obs_error']:.4f}")
     print(f"  Mean final position error: {metrics['mean_final_position_error']:.4f}")
     print(f"  Success match rate: {metrics['success_match_rate']:.1%}")
     print(f"  True final goal distance: {metrics['true_final_dist_mean']:.3f}")
     print(f"  Model final goal distance: {metrics['model_final_dist_mean']:.3f}")
+
+    if metrics.get("is_ensemble", False):
+        print("\nEnsemble Metrics:")
+        print(f"  Mean uncertainty-error correlation: {metrics['mean_uncertainty_error_correlation']:.3f}")
+        print(f"  Final observation uncertainty: {metrics['mean_obs_uncertainty'][-1]:.4f}")
+        if metrics['mean_uncertainty_error_correlation'] > 0.5:
+            print("  ✓ Good uncertainty calibration (ρ > 0.5)")
 
     # Determine model quality
     if metrics['mean_final_obs_error'] < 0.1:

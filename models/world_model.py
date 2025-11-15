@@ -303,35 +303,48 @@ class EnsembleWorldModel(nn.Module):
         self,
         obs: torch.Tensor,
         action: torch.Tensor,
-        return_all: bool = False,
+        reduce: str = "mean",
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through ensemble.
 
         Args:
-            obs: Current observation
-            action: Action
-            return_all: Whether to return all predictions or mean
+            obs: Current observation [batch_size, obs_dim]
+            action: Action [batch_size, action_dim]
+            reduce: Reduction method ("none", "mean", "mean_std")
 
         Returns:
-            next_obs: Predicted next observation
-            reward: Predicted reward
+            When reduce="none":
+                next_obs: [ensemble_size, batch_size, obs_dim]
+                rewards: [ensemble_size, batch_size, 1]
+            When reduce="mean":
+                next_obs: [batch_size, obs_dim]
+                rewards: [batch_size, 1]
+            When reduce="mean_std":
+                (next_obs_mean, next_obs_std): each [batch_size, obs_dim]
+                (rewards_mean, rewards_std): each [batch_size, 1]
         """
         predictions = []
         for model in self.models:
             next_obs, reward = model(obs, action)
             predictions.append((next_obs, reward))
 
-        if return_all:
-            # Return all predictions
-            next_obs = torch.stack([p[0] for p in predictions])
-            rewards = torch.stack([p[1] for p in predictions])
-            return next_obs, rewards
+        # Stack predictions
+        next_obs_all = torch.stack([p[0] for p in predictions])  # [ensemble_size, batch, obs_dim]
+        rewards_all = torch.stack([p[1] for p in predictions])    # [ensemble_size, batch, 1]
+
+        if reduce == "none":
+            return next_obs_all, rewards_all
+        elif reduce == "mean":
+            return next_obs_all.mean(dim=0), rewards_all.mean(dim=0)
+        elif reduce == "mean_std":
+            next_obs_mean = next_obs_all.mean(dim=0)
+            next_obs_std = next_obs_all.std(dim=0)
+            rewards_mean = rewards_all.mean(dim=0)
+            rewards_std = rewards_all.std(dim=0)
+            return (next_obs_mean, next_obs_std), (rewards_mean, rewards_std)
         else:
-            # Return mean prediction
-            next_obs = torch.stack([p[0] for p in predictions]).mean(dim=0)
-            rewards = torch.stack([p[1] for p in predictions]).mean(dim=0)
-            return next_obs, rewards
+            raise ValueError(f"Unknown reduce method: {reduce}")
 
     def forward_with_uncertainty(
         self,
@@ -343,13 +356,9 @@ class EnsembleWorldModel(nn.Module):
 
         Returns mean and standard deviation of predictions.
         """
-        next_obs_all, rewards_all = self.forward(obs, action, return_all=True)
-
-        next_obs_mean = next_obs_all.mean(dim=0)
-        next_obs_std = next_obs_all.std(dim=0)
-        rewards_mean = rewards_all.mean(dim=0)
-        rewards_std = rewards_all.std(dim=0)
-
+        (next_obs_mean, next_obs_std), (rewards_mean, rewards_std) = self.forward(
+            obs, action, reduce="mean_std"
+        )
         return next_obs_mean, next_obs_std, rewards_mean, rewards_std
 
     def loss(

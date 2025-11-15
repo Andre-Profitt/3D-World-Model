@@ -7,7 +7,7 @@ Plans actions by simulating futures in the learned model.
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Optional, Tuple, List, Callable
+from typing import Optional, Tuple, List, Callable, Union
 
 
 class MPCController:
@@ -32,6 +32,7 @@ class MPCController:
         use_cem: bool = True,
         action_min: float = -5.0,
         action_max: float = 5.0,
+        lambda_risk: float = 0.0,
         device: str = "cpu",
     ):
         """
@@ -50,6 +51,7 @@ class MPCController:
             use_cem: Whether to use CEM or random shooting
             action_min: Minimum action value
             action_max: Maximum action value
+            lambda_risk: Risk penalty weight (0=risk-neutral, >0=risk-averse)
             device: Device to run on
         """
         self.world_model = world_model
@@ -64,7 +66,15 @@ class MPCController:
         self.use_cem = use_cem
         self.action_min = action_min
         self.action_max = action_max
+        self.lambda_risk = lambda_risk
         self.device = device
+
+        # Check if we have an ensemble model
+        self.is_ensemble = hasattr(world_model, 'ensemble_size')
+        if self.is_ensemble:
+            print(f"MPC using ensemble model with {world_model.ensemble_size} members")
+            if self.lambda_risk > 0:
+                print(f"Risk-sensitive planning enabled with lambda_risk={self.lambda_risk}")
 
         # Move model to device
         self.world_model = self.world_model.to(device)
@@ -137,10 +147,10 @@ class MPCController:
             self.action_max
         )
 
-        # Evaluate sequences
+        # Evaluate sequences (may include risk adjustment)
         returns = self._evaluate_sequences(obs, action_sequences)
 
-        # Select best sequence
+        # Select best sequence (based on risk-adjusted returns if applicable)
         best_idx = returns.argmax()
         best_sequence = action_sequences[best_idx]
         best_return = returns[best_idx].item()
@@ -150,6 +160,13 @@ class MPCController:
             "mean_return": returns.mean().item(),
             "std_return": returns.std().item(),
         }
+
+        # Add risk info if applicable
+        if self.is_ensemble and self.lambda_risk > 0:
+            info["risk_penalty"] = self.lambda_risk
+            info["planning_mode"] = "risk-sensitive"
+        else:
+            info["planning_mode"] = "risk-neutral"
 
         return best_sequence[0], info
 
@@ -228,6 +245,13 @@ class MPCController:
             "optimization_iters": self.optimization_iters,
         }
 
+        # Add risk info if applicable
+        if self.is_ensemble and self.lambda_risk > 0:
+            info["risk_penalty"] = self.lambda_risk
+            info["planning_mode"] = "risk-sensitive"
+        else:
+            info["planning_mode"] = "risk-neutral"
+
         return best_sequence[0], info
 
     def _evaluate_sequences(
@@ -243,32 +267,72 @@ class MPCController:
             action_sequences: Action sequences [num_samples, horizon, action_dim]
 
         Returns:
-            returns: Discounted returns for each sequence [num_samples]
+            returns: Risk-adjusted returns for each sequence [num_samples]
         """
         num_samples = action_sequences.shape[0]
 
         # Expand initial observation for all samples
         obs_expanded = obs.unsqueeze(0).repeat(num_samples, 1)
 
-        returns = torch.zeros(num_samples, device=self.device)
-        discount = 1.0
+        if self.is_ensemble and self.lambda_risk > 0:
+            # For ensemble with risk-sensitive planning, track returns per member
+            returns_per_member = torch.zeros(
+                self.world_model.ensemble_size,
+                num_samples,
+                device=self.device
+            )
 
-        # Roll out each sequence
-        with torch.no_grad():
-            current_obs = obs_expanded
+            # Roll out each sequence with each ensemble member
+            with torch.no_grad():
+                for member_idx in range(self.world_model.ensemble_size):
+                    current_obs = obs_expanded
+                    discount = 1.0
 
-            for t in range(self.horizon):
-                actions = action_sequences[:, t]
+                    for t in range(self.horizon):
+                        actions = action_sequences[:, t]
 
-                # Predict next state and reward
-                next_obs, rewards = self.world_model(current_obs, actions)
+                        # Predict with specific ensemble member
+                        next_obs, rewards = self.world_model.models[member_idx](current_obs, actions)
 
-                # Accumulate discounted reward
-                returns += discount * rewards.squeeze(-1)
-                discount *= self.gamma
+                        # Accumulate discounted reward
+                        returns_per_member[member_idx] += discount * rewards.squeeze(-1)
+                        discount *= self.gamma
 
-                # Update observation
-                current_obs = next_obs
+                        # Update observation
+                        current_obs = next_obs
+
+            # Compute mean and std of returns across ensemble
+            mean_returns = returns_per_member.mean(dim=0)
+            std_returns = returns_per_member.std(dim=0)
+
+            # Risk-sensitive scoring: mean - lambda * std
+            returns = mean_returns - self.lambda_risk * std_returns
+
+        else:
+            # Standard evaluation (single model or risk-neutral ensemble)
+            returns = torch.zeros(num_samples, device=self.device)
+            discount = 1.0
+
+            # Roll out each sequence
+            with torch.no_grad():
+                current_obs = obs_expanded
+
+                for t in range(self.horizon):
+                    actions = action_sequences[:, t]
+
+                    # Predict next state and reward
+                    if self.is_ensemble:
+                        # Use mean predictions for risk-neutral ensemble
+                        next_obs, rewards = self.world_model(current_obs, actions, reduce="mean")
+                    else:
+                        next_obs, rewards = self.world_model(current_obs, actions)
+
+                    # Accumulate discounted reward
+                    returns += discount * rewards.squeeze(-1)
+                    discount *= self.gamma
+
+                    # Update observation
+                    current_obs = next_obs
 
         return returns
 
@@ -330,7 +394,10 @@ class MPCController:
                 action = action_sequence[t].unsqueeze(0)
 
                 # Predict
-                next_obs, reward = self.world_model(current_obs, action)
+                if self.is_ensemble:
+                    next_obs, reward = self.world_model(current_obs, action, reduce="mean")
+                else:
+                    next_obs, reward = self.world_model(current_obs, action)
 
                 # Store
                 observations.append(next_obs.squeeze(0).cpu().numpy())

@@ -325,14 +325,15 @@ def main():
         help="Learning rate"
     )
     parser.add_argument(
-        "--ensemble",
+        "--use_ensemble",
         action="store_true",
+        default=config.MODEL_CONFIG.get("use_ensemble", False),
         help="Train ensemble model"
     )
     parser.add_argument(
         "--ensemble_size",
         type=int,
-        default=5,
+        default=config.MODEL_CONFIG.get("ensemble_size", 5),
         help="Ensemble size"
     )
     parser.add_argument(
@@ -380,14 +381,65 @@ def main():
     print(f"Action dimension: {action_dim}")
 
     # Create model
-    if args.ensemble:
-        model = EnsembleWorldModel(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            ensemble_size=args.ensemble_size,
-            **config.MODEL_CONFIG["world_model"],
-        )
-        print(f"Created ensemble model with {args.ensemble_size} members")
+    if args.use_ensemble:
+        # For ensemble, we'll train each member separately with bootstrap sampling
+        print(f"Training ensemble with {args.ensemble_size} members")
+
+        for member_idx in range(args.ensemble_size):
+            print(f"\n{'='*60}")
+            print(f"Training Ensemble Member {member_idx + 1}/{args.ensemble_size}")
+            print('='*60)
+
+            # Create bootstrap dataset for this member
+            bootstrap_indices = np.random.choice(
+                len(train_dataset),
+                size=int(len(train_dataset) * config.MODEL_CONFIG.get("bootstrap_ratio", 1.0)),
+                replace=True
+            )
+            bootstrap_dataset = torch.utils.data.Subset(train_dataset, bootstrap_indices)
+
+            # Create bootstrap data loader
+            bootstrap_loader = DataLoader(
+                bootstrap_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=config.DEVICE_CONFIG["num_workers"],
+                pin_memory=config.DEVICE_CONFIG["pin_memory"],
+            )
+
+            # Create single model for this member
+            model = WorldModel(
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                **config.MODEL_CONFIG["world_model"],
+            )
+
+            # Create trainer
+            trainer = WorldModelTrainer(
+                model=model,
+                train_loader=bootstrap_loader,
+                val_loader=val_loader,
+                device=args.device,
+                lr=args.lr,
+                weight_decay=config.TRAINING_CONFIG["world_model"]["weight_decay"],
+                gradient_clip=config.TRAINING_CONFIG["world_model"]["gradient_clip"],
+                use_tensorboard=config.EXPERIMENT_CONFIG["use_tensorboard"],
+            )
+
+            # Train this member
+            trainer.train(num_epochs=args.num_epochs)
+
+            # Save member checkpoint
+            member_path = config.WEIGHTS_DIR / f"world_model_member_{member_idx}.pt"
+            torch.save({
+                "member_idx": member_idx,
+                "model_state_dict": model.state_dict(),
+                "obs_dim": obs_dim,
+                "action_dim": action_dim,
+                "config": config.MODEL_CONFIG["world_model"],
+            }, member_path)
+            print(f"Saved ensemble member {member_idx} to {member_path}")
+
     else:
         model = WorldModel(
             obs_dim=obs_dim,
@@ -396,24 +448,24 @@ def main():
         )
         print("Created single world model")
 
-    # Count parameters
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Total parameters: {num_params:,}")
+        # Count parameters
+        num_params = sum(p.numel() for p in model.parameters())
+        print(f"Total parameters: {num_params:,}")
 
-    # Create trainer
-    trainer = WorldModelTrainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=args.device,
-        lr=args.lr,
-        weight_decay=config.TRAINING_CONFIG["world_model"]["weight_decay"],
-        gradient_clip=config.TRAINING_CONFIG["world_model"]["gradient_clip"],
-        use_tensorboard=config.EXPERIMENT_CONFIG["use_tensorboard"],
-    )
+        # Create trainer
+        trainer = WorldModelTrainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=args.device,
+            lr=args.lr,
+            weight_decay=config.TRAINING_CONFIG["world_model"]["weight_decay"],
+            gradient_clip=config.TRAINING_CONFIG["world_model"]["gradient_clip"],
+            use_tensorboard=config.EXPERIMENT_CONFIG["use_tensorboard"],
+        )
 
-    # Train
-    trainer.train(num_epochs=args.num_epochs)
+        # Train
+        trainer.train(num_epochs=args.num_epochs)
 
 
 if __name__ == "__main__":

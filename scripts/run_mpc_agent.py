@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from envs import Simple3DNavEnv
-from models import WorldModel, MPCController, MPCAgent
+from models import WorldModel, EnsembleWorldModel, MPCController, MPCAgent
 import config
 
 
@@ -336,6 +336,24 @@ def main():
         help="Visualize planning process"
     )
     parser.add_argument(
+        "--use_ensemble",
+        action="store_true",
+        default=config.MODEL_CONFIG.get("use_ensemble", False),
+        help="Use ensemble world model"
+    )
+    parser.add_argument(
+        "--ensemble_size",
+        type=int,
+        default=config.MODEL_CONFIG.get("ensemble_size", 5),
+        help="Number of ensemble members"
+    )
+    parser.add_argument(
+        "--lambda_risk",
+        type=float,
+        default=config.MPC_CONFIG.get("lambda_risk", 0.0),
+        help="Risk penalty weight (0=risk-neutral, >0=risk-averse)"
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=config.DEVICE_CONFIG["device"],
@@ -344,16 +362,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Check if model exists
-    if not Path(args.model_path).exists():
-        print(f"Error: Model not found at {args.model_path}")
-        print("Please train the model first: python training/train_world_model.py")
-        return
-
-    # Load model
-    print(f"Loading model from {args.model_path}...")
-    checkpoint = torch.load(args.model_path, map_location=args.device)
-
     # Create environment
     env = Simple3DNavEnv(**config.ENV_CONFIG)
 
@@ -361,14 +369,57 @@ def main():
     obs_dim = env.observation_space_shape[0]
     action_dim = env.action_space_shape[0]
 
-    # Create world model
-    world_model = WorldModel(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        **config.MODEL_CONFIG["world_model"],
-    )
-    world_model.load_state_dict(checkpoint["model_state_dict"])
-    print(f"Loaded model from epoch {checkpoint['epoch']} with val loss {checkpoint['best_val_loss']:.4f}")
+    # Create and load world model
+    if args.use_ensemble:
+        # Load ensemble model
+        print(f"Loading ensemble model with {args.ensemble_size} members...")
+
+        # Create ensemble model
+        world_model = EnsembleWorldModel(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            ensemble_size=args.ensemble_size,
+            **config.MODEL_CONFIG["world_model"],
+        )
+
+        # Load each member
+        members_loaded = 0
+        for member_idx in range(args.ensemble_size):
+            member_path = config.WEIGHTS_DIR / f"world_model_member_{member_idx}.pt"
+            if member_path.exists():
+                checkpoint = torch.load(member_path, map_location=args.device)
+                world_model.models[member_idx].load_state_dict(checkpoint["model_state_dict"])
+                members_loaded += 1
+                print(f"  Loaded member {member_idx} from {member_path}")
+            else:
+                print(f"  Warning: Member {member_idx} not found at {member_path}")
+
+        if members_loaded == 0:
+            print("Error: No ensemble members found!")
+            print("Please train the ensemble model first: python training/train_world_model.py --use_ensemble")
+            return
+
+        if members_loaded < args.ensemble_size:
+            print(f"Warning: Only {members_loaded}/{args.ensemble_size} members loaded")
+
+    else:
+        # Load single model
+        if not Path(args.model_path).exists():
+            print(f"Error: Model not found at {args.model_path}")
+            print("Please train the model first: python training/train_world_model.py")
+            return
+
+        print(f"Loading model from {args.model_path}...")
+        checkpoint = torch.load(args.model_path, map_location=args.device)
+
+        # Create single world model
+        world_model = WorldModel(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            **config.MODEL_CONFIG["world_model"],
+        )
+        world_model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Loaded model from epoch {checkpoint['epoch']} with val loss {checkpoint['best_val_loss']:.4f}")
 
     # Create MPC controller
     controller = MPCController(
@@ -384,6 +435,7 @@ def main():
         use_cem=args.use_cem,
         action_min=-env.max_acceleration,
         action_max=env.max_acceleration,
+        lambda_risk=args.lambda_risk,
         device=args.device,
     )
 

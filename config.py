@@ -37,24 +37,43 @@ DATA_COLLECTION = {
 
 # Model architecture
 MODEL_CONFIG = {
+    # Ensemble settings
+    "use_ensemble": False,  # Whether to use ensemble of models
+    "ensemble_size": 5,     # Number of models in ensemble
+    "bootstrap_ratio": 1.0, # Ratio of data to sample for each member
+
     # World model
     "world_model": {
         "hidden_dims": [256, 256, 256],
         "activation": "relu",
         "dropout": 0.0,
         "layer_norm": False,
+        "predict_delta": True,  # Predict state changes instead of absolute states
     },
 
-    # Optional encoder/decoder (for future visual observations)
+    # Encoder/decoder for latent representation
     "encoder": {
-        "hidden_dims": [128, 64],
-        "latent_dim": 32,
+        "hidden_dims": [128, 128],
+        "latent_dim": 16,  # Compressed representation
         "activation": "relu",
+        "layer_norm": True,
+        "dropout": 0.0,
     },
 
     "decoder": {
-        "hidden_dims": [64, 128],
+        "hidden_dims": [128, 128],
         "activation": "relu",
+        "layer_norm": True,
+        "dropout": 0.0,
+    },
+
+    # Latent world model
+    "latent_world_model": {
+        "hidden_dims": [128, 128],
+        "activation": "relu",
+        "predict_delta": True,
+        "separate_reward_head": True,
+        "beta_recon": 0.1,  # Reconstruction loss weight
     },
 }
 
@@ -97,6 +116,7 @@ MPC_CONFIG = {
     "optimization_iters": 3,      # CEM optimization iterations
     "action_noise": 0.3,          # Noise for action sampling
     "use_cem": True,              # Use CEM instead of random shooting
+    "lambda_risk": 0.0,           # Risk penalty weight (0=risk-neutral, >0=risk-averse)
 }
 
 # Evaluation configuration
@@ -129,8 +149,12 @@ MODEL_PATHS = {
     "world_model": WEIGHTS_DIR / "world_model.pt",
     "encoder": WEIGHTS_DIR / "encoder.pt",
     "decoder": WEIGHTS_DIR / "decoder.pt",
+    "autoencoder": WEIGHTS_DIR / "autoencoder.pt",
+    "latent_world_model": WEIGHTS_DIR / "latent_world_model.pt",
     "optimizer": WEIGHTS_DIR / "optimizer.pt",
     "best_model": WEIGHTS_DIR / "best_world_model.pt",
+    "best_autoencoder": WEIGHTS_DIR / "best_autoencoder.pt",
+    "best_latent_model": WEIGHTS_DIR / "best_latent_world_model.pt",
 }
 
 DATA_PATHS = {
