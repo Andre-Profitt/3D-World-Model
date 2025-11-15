@@ -1,13 +1,13 @@
 # 3D World Model - Comprehensive Evaluation Report
 
-*Generated: 2025-11-15 16:52:26*
+*Generated: 2025-11-15 17:35:08*
 
 ## Executive Summary
 
 ⚠️ **PARTIAL SUCCESS**: The model shows good performance but hasn't fully achieved the 20-step target
 
 - **Effective Planning Horizon**: 0 steps (normalized space)
-- **Total State Horizon**: 2 steps
+- **Total State Horizon**: 1 steps
 
 ## Model Architecture
 
@@ -26,9 +26,9 @@
 ## Performance Metrics
 
 ### Reconstruction Quality
-- **Mean Error (normalized)**: 0.082562
-- **Mean Error (original)**: 0.191072
-- **95th Percentile**: 0.123843
+- **Mean Error (normalized)**: 0.081658
+- **Mean Error (original)**: 0.189612
+- **95th Percentile**: 0.122487
 - **Target Achievement**: ❌ FAILED
 
 ### Planning Horizon by Component
@@ -36,9 +36,9 @@
 | Component | Effective Horizon | Threshold | Status |
 |-----------|------------------|-----------|---------|
 | Position | 1 steps | 1.00 | ❌ |
-| Velocity | 1 steps | 0.50 | ❌ |
-| Goal Position | 5 steps | 2.00 | ❌ |
-| Total State | 2 steps | 2.00 | ❌ |
+| Velocity | 0 steps | 0.50 | ❌ |
+| Goal Position | 1 steps | 2.00 | ❌ |
+| Total State | 1 steps | 2.00 | ❌ |
 | Normalized Space | 0 steps | 0.50 | ❌ |
 
 ## Error Growth Analysis
@@ -47,18 +47,18 @@
 
 | Timestep | Mean Error | Std Dev | 95th Percentile |
 |----------|------------|---------|-----------------|
-| Step 5 | 2.2705 | 0.4089 | 2.8051 |
-| Step 10 | 3.4147 | 0.5705 | 4.2812 |
-| Step 15 | 4.0730 | 0.5739 | 4.9472 |
-| Step 20 | 4.4886 | 0.5985 | 5.5623 |
-| Step 25 | 4.7617 | 0.6473 | 5.9082 |
-| Step 30 | 4.9274 | 0.6728 | 6.1683 |
+| Step 5 | 2.9311 | 0.8540 | 4.4511 |
+| Step 10 | 3.6352 | 0.8797 | 5.2133 |
+| Step 15 | 3.9615 | 0.8564 | 5.4542 |
+| Step 20 | 4.1552 | 0.8300 | 5.4740 |
+| Step 25 | 4.2786 | 0.8054 | 5.4874 |
+| Step 30 | 4.3712 | 0.7912 | 5.5915 |
 
 ## Model Comparison
 
 | Model | Reconstruction Error | Effective Horizon | Error@10 | Error@20 |
 |-------|---------------------|-------------------|----------|----------|
-| VAE + Latent Dynamics | 0.083476 | 1 | 3.2013 | 4.3326 |
+| VAE + Latent Dynamics | 0.085342 | 1 | 3.6767 | 4.1956 |
 
 ## Improvements from Previous Version
 
