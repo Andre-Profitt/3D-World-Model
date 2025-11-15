@@ -1,0 +1,172 @@
+"""
+Configuration file for 3D World Model project.
+
+Contains all hyperparameters and settings for the environment, models, and training.
+"""
+
+import os
+from pathlib import Path
+
+# Project paths
+PROJECT_ROOT = Path(__file__).parent
+DATA_DIR = PROJECT_ROOT / "data"
+WEIGHTS_DIR = PROJECT_ROOT / "weights"
+LOGS_DIR = PROJECT_ROOT / "logs"
+
+# Create directories if they don't exist
+for dir_path in [DATA_DIR, WEIGHTS_DIR, LOGS_DIR]:
+    dir_path.mkdir(exist_ok=True)
+
+# Environment configuration
+ENV_CONFIG = {
+    "world_size": (10.0, 10.0, 10.0),  # (width, depth, height)
+    "dt": 0.05,                        # Physics timestep
+    "max_velocity": 2.0,               # Maximum velocity magnitude
+    "max_acceleration": 5.0,           # Maximum acceleration magnitude
+    "goal_radius": 0.5,                # Distance to goal for success
+    "seed": 42,                        # Random seed for reproducibility
+}
+
+# Data collection
+DATA_COLLECTION = {
+    "num_episodes": 1000,
+    "max_steps_per_episode": 200,
+    "random_policy_seed": 123,
+    "save_frequency": 100,  # Save data every N episodes
+}
+
+# Model architecture
+MODEL_CONFIG = {
+    # World model
+    "world_model": {
+        "hidden_dims": [256, 256, 256],
+        "activation": "relu",
+        "dropout": 0.0,
+        "layer_norm": False,
+    },
+
+    # Optional encoder/decoder (for future visual observations)
+    "encoder": {
+        "hidden_dims": [128, 64],
+        "latent_dim": 32,
+        "activation": "relu",
+    },
+
+    "decoder": {
+        "hidden_dims": [64, 128],
+        "activation": "relu",
+    },
+}
+
+# Training configuration
+TRAINING_CONFIG = {
+    # World model training
+    "world_model": {
+        "batch_size": 256,
+        "learning_rate": 1e-3,
+        "weight_decay": 1e-5,
+        "num_epochs": 100,
+        "gradient_clip": 1.0,
+        "lr_scheduler": {
+            "type": "cosine",
+            "min_lr": 1e-5,
+        },
+        "early_stopping": {
+            "patience": 10,
+            "min_delta": 1e-4,
+        },
+    },
+
+    # Data split
+    "train_ratio": 0.9,
+    "val_ratio": 0.1,
+
+    # Logging
+    "log_frequency": 10,  # Log every N batches
+    "eval_frequency": 1,  # Evaluate every N epochs
+    "save_frequency": 5,  # Save checkpoint every N epochs
+}
+
+# MPC Controller configuration
+MPC_CONFIG = {
+    "horizon": 15,                # Planning horizon
+    "num_samples": 1024,          # Number of action sequences to sample
+    "num_elite": 64,              # Elite samples for CEM (if using)
+    "gamma": 0.99,                # Discount factor
+    "temperature": 0.1,           # Temperature for action sampling
+    "optimization_iters": 3,      # CEM optimization iterations
+    "action_noise": 0.3,          # Noise for action sampling
+    "use_cem": True,              # Use CEM instead of random shooting
+}
+
+# Evaluation configuration
+EVAL_CONFIG = {
+    "num_episodes": 50,
+    "max_steps": 500,
+    "render": True,
+    "save_videos": True,
+    "video_frequency": 10,  # Save video every N episodes
+}
+
+# Experiment tracking
+EXPERIMENT_CONFIG = {
+    "name": "3d_world_model_baseline",
+    "tags": ["3d", "world_model", "mpc"],
+    "notes": "Baseline 3D world model with MPC control",
+    "use_tensorboard": True,
+    "use_wandb": False,  # Optional: Weights & Biases tracking
+}
+
+# Device configuration
+DEVICE_CONFIG = {
+    "device": "cuda" if os.environ.get("USE_CUDA") else "mps" if os.environ.get("USE_MPS") else "cpu",
+    "num_workers": 4,  # For data loading
+    "pin_memory": True,
+}
+
+# File paths
+MODEL_PATHS = {
+    "world_model": WEIGHTS_DIR / "world_model.pt",
+    "encoder": WEIGHTS_DIR / "encoder.pt",
+    "decoder": WEIGHTS_DIR / "decoder.pt",
+    "optimizer": WEIGHTS_DIR / "optimizer.pt",
+    "best_model": WEIGHTS_DIR / "best_world_model.pt",
+}
+
+DATA_PATHS = {
+    "train_data": DATA_DIR / "train_data.npz",
+    "val_data": DATA_DIR / "val_data.npz",
+    "raw_trajectories": DATA_DIR / "raw_trajectories.npz",
+}
+
+# Reproducibility
+SEED = 42
+
+def get_config(config_name: str = None):
+    """
+    Get configuration dictionary by name.
+
+    Args:
+        config_name: Name of configuration to retrieve
+
+    Returns:
+        Configuration dictionary
+    """
+    configs = {
+        "env": ENV_CONFIG,
+        "data": DATA_COLLECTION,
+        "model": MODEL_CONFIG,
+        "training": TRAINING_CONFIG,
+        "mpc": MPC_CONFIG,
+        "eval": EVAL_CONFIG,
+        "experiment": EXPERIMENT_CONFIG,
+        "device": DEVICE_CONFIG,
+        "paths": {
+            "model": MODEL_PATHS,
+            "data": DATA_PATHS,
+        },
+    }
+
+    if config_name:
+        return configs.get(config_name, {})
+    return configs

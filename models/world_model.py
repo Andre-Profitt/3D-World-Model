@@ -1,0 +1,395 @@
+"""
+World Model for 3D environment dynamics and reward prediction.
+
+Learns to predict next state and reward given current state and action.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Tuple, Optional, Dict
+import numpy as np
+
+
+class MLP(nn.Module):
+    """Multi-layer perceptron with configurable architecture."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dims: List[int],
+        activation: str = "relu",
+        dropout: float = 0.0,
+        layer_norm: bool = False,
+    ):
+        """
+        Initialize MLP.
+
+        Args:
+            input_dim: Input dimension
+            output_dim: Output dimension
+            hidden_dims: List of hidden layer dimensions
+            activation: Activation function ("relu", "tanh", "elu")
+            dropout: Dropout probability
+            layer_norm: Whether to use layer normalization
+        """
+        super().__init__()
+
+        # Build layers
+        layers = []
+        prev_dim = input_dim
+
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+
+            if layer_norm:
+                layers.append(nn.LayerNorm(hidden_dim))
+
+            # Add activation
+            if activation == "relu":
+                layers.append(nn.ReLU())
+            elif activation == "tanh":
+                layers.append(nn.Tanh())
+            elif activation == "elu":
+                layers.append(nn.ELU())
+            else:
+                raise ValueError(f"Unknown activation: {activation}")
+
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+
+            prev_dim = hidden_dim
+
+        # Output layer
+        layers.append(nn.Linear(prev_dim, output_dim))
+
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        return self.network(x)
+
+
+class WorldModel(nn.Module):
+    """
+    World model that predicts next observation and reward.
+
+    Takes (obs_t, action_t) and predicts (obs_{t+1}, reward_t).
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dims: List[int] = [256, 256, 256],
+        activation: str = "relu",
+        dropout: float = 0.0,
+        layer_norm: bool = False,
+        predict_delta: bool = True,
+    ):
+        """
+        Initialize world model.
+
+        Args:
+            obs_dim: Observation dimension
+            action_dim: Action dimension
+            hidden_dims: Hidden layer dimensions
+            activation: Activation function
+            dropout: Dropout probability
+            layer_norm: Whether to use layer normalization
+            predict_delta: Whether to predict state delta instead of next state
+        """
+        super().__init__()
+
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.predict_delta = predict_delta
+
+        # Input: concatenated observation and action
+        input_dim = obs_dim + action_dim
+
+        # Output: next observation + reward
+        output_dim = obs_dim + 1
+
+        # Build network
+        self.network = MLP(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_dims=hidden_dims,
+            activation=activation,
+            dropout=dropout,
+            layer_norm=layer_norm,
+        )
+
+        # Optional: separate heads for state and reward
+        self.use_separate_heads = False
+        if self.use_separate_heads:
+            # Shared trunk
+            self.trunk = MLP(
+                input_dim=input_dim,
+                output_dim=hidden_dims[-1],
+                hidden_dims=hidden_dims[:-1],
+                activation=activation,
+                dropout=dropout,
+                layer_norm=layer_norm,
+            )
+            # State prediction head
+            self.state_head = nn.Linear(hidden_dims[-1], obs_dim)
+            # Reward prediction head
+            self.reward_head = nn.Linear(hidden_dims[-1], 1)
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass.
+
+        Args:
+            obs: Current observation [batch_size, obs_dim]
+            action: Action [batch_size, action_dim]
+
+        Returns:
+            next_obs: Predicted next observation [batch_size, obs_dim]
+            reward: Predicted reward [batch_size, 1]
+        """
+        # Concatenate inputs
+        x = torch.cat([obs, action], dim=-1)
+
+        if self.use_separate_heads:
+            # Shared trunk + separate heads
+            features = self.trunk(x)
+            next_obs_pred = self.state_head(features)
+            reward_pred = self.reward_head(features)
+        else:
+            # Single network
+            output = self.network(x)
+            next_obs_pred = output[..., :self.obs_dim]
+            reward_pred = output[..., self.obs_dim:]
+
+        # Apply delta prediction if configured
+        if self.predict_delta:
+            next_obs_pred = obs + next_obs_pred
+
+        return next_obs_pred, reward_pred
+
+    def loss(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor,
+        next_obs: torch.Tensor,
+        reward: torch.Tensor,
+        weights: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute loss for training.
+
+        Args:
+            obs: Current observations
+            action: Actions
+            next_obs: True next observations
+            reward: True rewards
+            weights: Optional sample weights
+
+        Returns:
+            Dictionary of losses
+        """
+        # Predict
+        next_obs_pred, reward_pred = self.forward(obs, action)
+
+        # MSE loss for state prediction
+        if self.predict_delta:
+            # If predicting delta, compute loss on delta
+            delta_true = next_obs - obs
+            delta_pred = next_obs_pred - obs
+            state_loss = F.mse_loss(delta_pred, delta_true, reduction='none')
+        else:
+            state_loss = F.mse_loss(next_obs_pred, next_obs, reduction='none')
+
+        # MSE loss for reward prediction
+        reward_loss = F.mse_loss(reward_pred, reward.unsqueeze(-1), reduction='none')
+
+        # Apply sample weights if provided
+        if weights is not None:
+            state_loss = state_loss * weights.unsqueeze(-1)
+            reward_loss = reward_loss * weights.unsqueeze(-1)
+
+        # Aggregate losses
+        state_loss = state_loss.mean()
+        reward_loss = reward_loss.mean()
+        total_loss = state_loss + reward_loss
+
+        return {
+            "loss": total_loss,
+            "state_loss": state_loss,
+            "reward_loss": reward_loss,
+        }
+
+    def imagine_trajectory(
+        self,
+        initial_obs: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Imagine a trajectory by repeatedly applying the model.
+
+        Args:
+            initial_obs: Initial observation [batch_size, obs_dim]
+            actions: Sequence of actions [batch_size, horizon, action_dim]
+
+        Returns:
+            observations: Predicted observations [batch_size, horizon+1, obs_dim]
+            rewards: Predicted rewards [batch_size, horizon]
+        """
+        batch_size, horizon, _ = actions.shape
+
+        observations = [initial_obs]
+        rewards = []
+
+        obs = initial_obs
+        for t in range(horizon):
+            action = actions[:, t]
+            next_obs, reward = self.forward(obs, action)
+
+            observations.append(next_obs)
+            rewards.append(reward.squeeze(-1))
+
+            obs = next_obs
+
+        observations = torch.stack(observations, dim=1)
+        rewards = torch.stack(rewards, dim=1)
+
+        return observations, rewards
+
+
+class EnsembleWorldModel(nn.Module):
+    """
+    Ensemble of world models for uncertainty estimation.
+
+    Trains multiple models and aggregates predictions.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        ensemble_size: int = 5,
+        **kwargs
+    ):
+        """
+        Initialize ensemble world model.
+
+        Args:
+            obs_dim: Observation dimension
+            action_dim: Action dimension
+            ensemble_size: Number of models in ensemble
+            **kwargs: Arguments passed to individual models
+        """
+        super().__init__()
+
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.ensemble_size = ensemble_size
+
+        # Create ensemble of models
+        self.models = nn.ModuleList([
+            WorldModel(obs_dim, action_dim, **kwargs)
+            for _ in range(ensemble_size)
+        ])
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor,
+        return_all: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through ensemble.
+
+        Args:
+            obs: Current observation
+            action: Action
+            return_all: Whether to return all predictions or mean
+
+        Returns:
+            next_obs: Predicted next observation
+            reward: Predicted reward
+        """
+        predictions = []
+        for model in self.models:
+            next_obs, reward = model(obs, action)
+            predictions.append((next_obs, reward))
+
+        if return_all:
+            # Return all predictions
+            next_obs = torch.stack([p[0] for p in predictions])
+            rewards = torch.stack([p[1] for p in predictions])
+            return next_obs, rewards
+        else:
+            # Return mean prediction
+            next_obs = torch.stack([p[0] for p in predictions]).mean(dim=0)
+            rewards = torch.stack([p[1] for p in predictions]).mean(dim=0)
+            return next_obs, rewards
+
+    def forward_with_uncertainty(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass with uncertainty estimation.
+
+        Returns mean and standard deviation of predictions.
+        """
+        next_obs_all, rewards_all = self.forward(obs, action, return_all=True)
+
+        next_obs_mean = next_obs_all.mean(dim=0)
+        next_obs_std = next_obs_all.std(dim=0)
+        rewards_mean = rewards_all.mean(dim=0)
+        rewards_std = rewards_all.std(dim=0)
+
+        return next_obs_mean, next_obs_std, rewards_mean, rewards_std
+
+    def loss(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor,
+        next_obs: torch.Tensor,
+        reward: torch.Tensor,
+        model_idx: Optional[int] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute loss for training.
+
+        Args:
+            obs: Current observations
+            action: Actions
+            next_obs: True next observations
+            reward: True rewards
+            model_idx: Index of model to train (None for all)
+
+        Returns:
+            Dictionary of losses
+        """
+        if model_idx is not None:
+            # Train single model
+            return self.models[model_idx].loss(obs, action, next_obs, reward)
+        else:
+            # Train all models
+            total_loss = 0
+            state_loss = 0
+            reward_loss = 0
+
+            for model in self.models:
+                losses = model.loss(obs, action, next_obs, reward)
+                total_loss += losses["loss"]
+                state_loss += losses["state_loss"]
+                reward_loss += losses["reward_loss"]
+
+            return {
+                "loss": total_loss / self.ensemble_size,
+                "state_loss": state_loss / self.ensemble_size,
+                "reward_loss": reward_loss / self.ensemble_size,
+            }
