@@ -14,6 +14,22 @@ from .vision_encoder import (
     ResNetVisionEncoder,
     create_vision_encoder,
 )
+from .stochastic_world_model import (
+    StochasticWorldModel,
+    StochasticEnsembleWorldModel,
+    StochasticMLP,
+)
+from .stochastic_vae_model import (
+    StochasticEncoder,
+    StochasticDecoder,
+    StochasticVAEDynamics,
+    StochasticVAEWorldModel,
+)
+from .risk_metrics import (
+    RiskMetrics,
+    RiskSensitiveMPC,
+    compute_trajectory_risk,
+)
 
 __all__ = [
     "WorldModel",
@@ -31,4 +47,14 @@ __all__ = [
     "VisionDecoder",
     "ResNetVisionEncoder",
     "create_vision_encoder",
+    "StochasticWorldModel",
+    "StochasticEnsembleWorldModel",
+    "StochasticMLP",
+    "StochasticEncoder",
+    "StochasticDecoder",
+    "StochasticVAEDynamics",
+    "StochasticVAEWorldModel",
+    "RiskMetrics",
+    "RiskSensitiveMPC",
+    "compute_trajectory_risk",
 ]

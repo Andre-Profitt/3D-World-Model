@@ -85,6 +85,32 @@ MODEL_CONFIG = {
         "beta_recon": 0.1,  # Reconstruction loss weight
     },
 
+    # Stochastic world model
+    "stochastic_world_model": {
+        "hidden_dims": [256, 256, 256],
+        "activation": "relu",
+        "dropout": 0.0,
+        "layer_norm": False,
+        "predict_delta": True,
+        "min_std": 0.01,
+        "max_std": 1.0,
+        "separate_reward_head": True,
+        "deterministic": False,
+    },
+
+    # Stochastic VAE model
+    "stochastic_vae": {
+        "latent_dim": 32,
+        "encoder_hidden": [256, 256],
+        "decoder_hidden": [256, 256],
+        "dynamics_hidden": [256, 256],
+        "activation": "relu",
+        "predict_delta": True,
+        "beta": 1.0,  # KL divergence weight
+        "free_nats": 3.0,  # Minimum KL value
+        "reconstruction_loss": "mse",  # "mse" or "gaussian_nll"
+    },
+
     # Vision encoder for image observations
     "vision_encoder": {
         "architecture": "simple",  # "simple" or "resnet"
@@ -138,6 +164,15 @@ MPC_CONFIG = {
     "action_noise": 0.3,          # Noise for action sampling
     "use_cem": True,              # Use CEM instead of random shooting
     "lambda_risk": 0.0,           # Risk penalty weight (0=risk-neutral, >0=risk-averse)
+
+    # Risk-aware planning
+    "risk_sensitive": {
+        "enabled": False,         # Enable risk-sensitive planning
+        "num_particles": 10,      # Number of stochastic particles
+        "risk_metric": "cvar",    # "cvar", "var", "worst_case", "mean_std", "entropic"
+        "risk_level": 0.1,        # Risk level for CVaR/VaR (0.1 = 10% worst cases)
+        "lambda_risk": 1.0,       # Risk aversion strength
+    },
 }
 
 # Evaluation configuration
