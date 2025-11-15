@@ -6,76 +6,39 @@ __pycache__/
 .Python
 venv/
 env/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+dist/
+build/
 
-# PyTorch
+# Model weights (too large for GitHub)
+weights/*.pt
+weights/*.pth
 *.pt
 *.pth
-*.pkl
-*.ckpt
-weights/
-checkpoints/
 
-# Data
+# Data files
 data/
 *.npz
-*.npy
-*.h5
-*.hdf5
+*.pkl
 
-# Logs
+# Logs and outputs
 logs/
-runs/
-*.log
 tensorboard/
-wandb/
-
-# Jupyter
-.ipynb_checkpoints
-*.ipynb
+*.png
+*.jpg
+*.jpeg
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# OS
 .DS_Store
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Environment
-.env
-.env.local
-
-# Output
-output/
-results/
-figures/
-*.png
-*.jpg
-*.gif
-*.mp4
-*.avi
+Thumbs.db
 
 # Temporary
-tmp/
-temp/
 *.tmp
+*.bak
+*~

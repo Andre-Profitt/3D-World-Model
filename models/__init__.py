@@ -8,6 +8,7 @@ from .encoder_decoder import (
     create_encoder_decoder_pair,
 )
 from .latent_world_model import LatentWorldModel, LatentEnsembleWorldModel
+from .latent_mpc_wrapper import LatentMPCWrapper
 from .vision_encoder import (
     VisionEncoder,
     VisionDecoder,
@@ -30,6 +31,13 @@ from .risk_metrics import (
     RiskSensitiveMPC,
     compute_trajectory_risk,
 )
+from .vae import (
+    VAE,
+    VAEEncoder,
+    VAEDecoder,
+    ConvVAEEncoder,
+    ConvVAEDecoder,
+)
 
 __all__ = [
     "WorldModel",
@@ -43,6 +51,7 @@ __all__ = [
     "create_encoder_decoder_pair",
     "LatentWorldModel",
     "LatentEnsembleWorldModel",
+    "LatentMPCWrapper",
     "VisionEncoder",
     "VisionDecoder",
     "ResNetVisionEncoder",
@@ -57,4 +66,9 @@ __all__ = [
     "RiskMetrics",
     "RiskSensitiveMPC",
     "compute_trajectory_risk",
+    "VAE",
+    "VAEEncoder",
+    "VAEDecoder",
+    "ConvVAEEncoder",
+    "ConvVAEDecoder",
 ]

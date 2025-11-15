@@ -22,7 +22,10 @@ from typing import Dict, Optional
 
 from models import Encoder, Decoder
 from models.latent_world_model import LatentWorldModel, LatentEnsembleWorldModel
-import config
+# Import local config directly
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as project_config
+config = project_config
 
 
 class LatentTransitionDataset(Dataset):

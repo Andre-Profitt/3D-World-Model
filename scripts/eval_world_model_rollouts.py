@@ -9,6 +9,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -644,6 +645,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Add missing import
-    import torch.nn as nn
     main()

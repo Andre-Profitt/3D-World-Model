@@ -16,7 +16,10 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from envs import Simple3DNavEnv
-from models import WorldModel, EnsembleWorldModel, MPCController, MPCAgent
+from models import (
+    WorldModel, EnsembleWorldModel, MPCController, MPCAgent,
+    Encoder, Decoder, LatentWorldModel, LatentMPCWrapper
+)
 import config
 
 
@@ -354,6 +357,29 @@ def main():
         help="Risk penalty weight (0=risk-neutral, >0=risk-averse)"
     )
     parser.add_argument(
+        "--use_latent",
+        action="store_true",
+        help="Use latent world model (V-M-C architecture)"
+    )
+    parser.add_argument(
+        "--encoder_path",
+        type=str,
+        default=str(config.MODEL_PATHS["encoder"]),
+        help="Path to trained encoder"
+    )
+    parser.add_argument(
+        "--decoder_path",
+        type=str,
+        default=str(config.MODEL_PATHS["decoder"]),
+        help="Path to trained decoder"
+    )
+    parser.add_argument(
+        "--latent_model_path",
+        type=str,
+        default=str(config.MODEL_PATHS["best_latent_model"]),
+        help="Path to trained latent world model"
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=config.DEVICE_CONFIG["device"],
@@ -370,7 +396,89 @@ def main():
     action_dim = env.action_space_shape[0]
 
     # Create and load world model
-    if args.use_ensemble:
+    if args.use_latent:
+        # Load latent world model (V-M-C architecture)
+        print("Loading latent world model (V-M-C architecture)...")
+
+        # Load encoder
+        if not Path(args.encoder_path).exists():
+            print(f"Error: Encoder not found at {args.encoder_path}")
+            print("Please train the autoencoder first: python training/train_autoencoder.py")
+            return
+
+        encoder = Encoder(
+            obs_dim=obs_dim,
+            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+            hidden_dims=config.MODEL_CONFIG["encoder"]["hidden_dims"],
+        )
+        encoder_checkpoint = torch.load(args.encoder_path, map_location=args.device)
+        if isinstance(encoder_checkpoint, dict) and "model_state_dict" in encoder_checkpoint:
+            encoder.load_state_dict(encoder_checkpoint["model_state_dict"])
+        else:
+            encoder.load_state_dict(encoder_checkpoint)
+        print(f"  Loaded encoder from {args.encoder_path}")
+
+        # Load decoder
+        if not Path(args.decoder_path).exists():
+            print(f"Error: Decoder not found at {args.decoder_path}")
+            print("Please train the autoencoder first: python training/train_autoencoder.py")
+            return
+
+        decoder = Decoder(
+            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+            obs_dim=obs_dim,
+            hidden_dims=config.MODEL_CONFIG["decoder"]["hidden_dims"],
+        )
+        decoder_checkpoint = torch.load(args.decoder_path, map_location=args.device)
+        if isinstance(decoder_checkpoint, dict) and "model_state_dict" in decoder_checkpoint:
+            decoder.load_state_dict(decoder_checkpoint["model_state_dict"])
+        else:
+            decoder.load_state_dict(decoder_checkpoint)
+        print(f"  Loaded decoder from {args.decoder_path}")
+
+        # Load latent world model
+        if not Path(args.latent_model_path).exists():
+            print(f"Error: Latent model not found at {args.latent_model_path}")
+            print("Please train the latent model first: python training/train_latent_world_model.py")
+            return
+
+        # Create latent world model with encoder/decoder
+        latent_config = {k: v for k, v in config.MODEL_CONFIG["latent_world_model"].items()
+                        if k != "beta_recon"}
+        latent_model = LatentWorldModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+            action_dim=action_dim,
+            **latent_config,
+        )
+
+        # Load only the dynamics and reward networks from checkpoint
+        checkpoint = torch.load(args.latent_model_path, map_location=args.device)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            # Extract only dynamics and reward network weights
+            state_dict = checkpoint["model_state_dict"]
+            dynamics_state = {k.replace("dynamics_net.", ""): v for k, v in state_dict.items() if k.startswith("dynamics_net.")}
+            reward_state = {k.replace("reward_net.", ""): v for k, v in state_dict.items() if k.startswith("reward_net.")}
+
+            # Load into the model
+            latent_model.dynamics_net.load_state_dict(dynamics_state)
+            if hasattr(latent_model, 'reward_net') and latent_model.separate_reward_head:
+                latent_model.reward_net.load_state_dict(reward_state)
+        else:
+            latent_model.load_state_dict(checkpoint)
+        print(f"  Loaded latent model from {args.latent_model_path}")
+
+        # Create wrapper
+        world_model = LatentMPCWrapper(
+            encoder=encoder,
+            decoder=decoder,
+            latent_world_model=latent_model,
+            device=torch.device(args.device),
+        )
+        print(f"  Created latent MPC wrapper (obs: {obs_dim}D → latent: {config.MODEL_CONFIG['encoder']['latent_dim']}D)")
+
+    elif args.use_ensemble:
         # Load ensemble model
         print(f"Loading ensemble model with {args.ensemble_size} members...")
 

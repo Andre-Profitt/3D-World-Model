@@ -196,8 +196,8 @@ EXPERIMENT_CONFIG = {
 # Device configuration
 DEVICE_CONFIG = {
     "device": "cuda" if os.environ.get("USE_CUDA") else "mps" if os.environ.get("USE_MPS") else "cpu",
-    "num_workers": 4,  # For data loading
-    "pin_memory": True,
+    "num_workers": 0,  # Set to 0 to avoid multiprocessing issues
+    "pin_memory": False,  # Disabled for MPS
 }
 
 # File paths
