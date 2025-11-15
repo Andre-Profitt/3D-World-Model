@@ -198,43 +198,41 @@ A modern world-model system featuring:
 
 ---
 
-## Milestone v0.5: Stochastic Dynamics
+## Milestone v0.5: Stochastic Dynamics ✅
 **Goal:** Full probabilistic world model with uncertainty quantification
 **Timeline:** 3-4 days
 **Impact:** State-of-the-art uncertainty handling
+**Status:** COMPLETED
 
-### Task 5: Stochastic World Model
+### Task 5: Stochastic World Model ✅
 
 **New files:**
-- `models/stochastic_world_model.py`
-- Update: `training/train_latent_world_model.py`
+- `models/stochastic_world_model.py` ✅
+- `models/stochastic_vae_model.py` ✅
+- `models/risk_metrics.py` ✅
+- `training/train_stochastic_model.py` ✅
 
 **Implementation:**
 
-1. **Stochastic Model** (2 hours)
-   ```python
-   class StochasticLatentWorldModel(nn.Module):
-       def forward(self, z, a):
-           # Output: mu_z, logvar_z, mu_r, logvar_r
-           # Reparameterization trick for training
-   ```
+1. **Stochastic Model** ✅
+   - StochasticWorldModel with Normal distributions
+   - StochasticEnsembleWorldModel combining epistemic and aleatoric uncertainty
+   - StochasticVAEWorldModel with full VAE architecture
 
-2. **Training with NLL** (2 hours)
-   ```python
-   # Negative log-likelihood loss
-   nll = -log_prob(z_next, mu_z, logvar_z)
-   loss = nll + beta * kl_divergence
-   ```
+2. **Training with NLL** ✅
+   - Negative log-likelihood loss implementation
+   - KL divergence regularization for VAE
+   - Entropy regularization to prevent collapse
 
-3. **Probabilistic Planning** (2 hours)
-   - Sample K trajectories from distributions
-   - Compute statistics over samples
-   - Risk-sensitive objectives (CVaR, etc.)
+3. **Probabilistic Planning** ✅
+   - Risk metrics: CVaR, VaR, worst-case, mean-std, entropic
+   - RiskSensitiveMPC for robust planning
+   - Uncertainty propagation in trajectory rollouts
 
 **Acceptance Criteria:**
-- [ ] NLL loss converges with reasonable variance values
-- [ ] MPC with risk penalty shows safer behavior
-- [ ] Documentation explains when to use stochastic vs deterministic
+- [x] NLL loss converges with reasonable variance values
+- [x] MPC with risk penalty shows safer behavior
+- [x] Documentation explains when to use stochastic vs deterministic
 
 ---
 
