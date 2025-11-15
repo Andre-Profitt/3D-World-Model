@@ -8,6 +8,12 @@ from .encoder_decoder import (
     create_encoder_decoder_pair,
 )
 from .latent_world_model import LatentWorldModel, LatentEnsembleWorldModel
+from .vision_encoder import (
+    VisionEncoder,
+    VisionDecoder,
+    ResNetVisionEncoder,
+    create_vision_encoder,
+)
 
 __all__ = [
     "WorldModel",
@@ -21,4 +27,8 @@ __all__ = [
     "create_encoder_decoder_pair",
     "LatentWorldModel",
     "LatentEnsembleWorldModel",
+    "VisionEncoder",
+    "VisionDecoder",
+    "ResNetVisionEncoder",
+    "create_vision_encoder",
 ]

@@ -6,9 +6,13 @@ No external physics engine required - pure numpy implementation.
 """
 
 import numpy as np
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, Literal
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.patches as patches
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+import io
+from PIL import Image
 
 
 class Simple3DNavEnv:
@@ -28,6 +32,10 @@ class Simple3DNavEnv:
         max_acceleration: float = 5.0,
         goal_radius: float = 0.5,
         seed: Optional[int] = None,
+        obs_type: Literal["state", "image", "both"] = "state",
+        image_size: Tuple[int, int] = (64, 64),
+        camera_mode: Literal["top_down", "agent_centric", "fixed_3d"] = "top_down",
+        grayscale: bool = True,
     ):
         """
         Initialize the 3D navigation environment.
@@ -39,6 +47,10 @@ class Simple3DNavEnv:
             max_acceleration: Maximum acceleration magnitude
             goal_radius: Distance to goal for success
             seed: Random seed
+            obs_type: Type of observation ("state", "image", "both")
+            image_size: Size of image observations (height, width)
+            camera_mode: Camera perspective mode
+            grayscale: Whether to use grayscale images
         """
         self.world_size = np.array(world_size)
         self.dt = dt
@@ -49,10 +61,24 @@ class Simple3DNavEnv:
         # Random number generator
         self.rng = np.random.default_rng(seed)
 
+        # Visual observation parameters
+        self.obs_type = obs_type
+        self.image_size = image_size
+        self.camera_mode = camera_mode
+        self.grayscale = grayscale
+        self.image_channels = 1 if grayscale else 3
+
         # State dimensions
         self.state_dim = 6  # [x, y, z, vx, vy, vz]
         self.action_dim = 3  # [ax, ay, az]
-        self.obs_dim = 9    # state + goal position
+
+        # Observation dimensions depend on type
+        if obs_type == "state":
+            self.obs_dim = 9    # state + goal position
+        elif obs_type == "image":
+            self.obs_dim = (self.image_channels, *image_size)
+        else:  # both
+            self.obs_dim = (9, (self.image_channels, *image_size))
 
         # Current state
         self.state = None
@@ -187,12 +213,267 @@ class Simple3DNavEnv:
 
     def _get_obs(self) -> np.ndarray:
         """
-        Get current observation.
+        Get current observation based on observation type.
 
         Returns:
-            observation: [state, goal_position]
+            observation: State vector, image, or both
         """
-        return np.concatenate([self.state, self.goal])
+        if self.obs_type == "state":
+            return np.concatenate([self.state, self.goal])
+        elif self.obs_type == "image":
+            return self._get_image_obs()
+        else:  # both
+            state_obs = np.concatenate([self.state, self.goal])
+            image_obs = self._get_image_obs()
+            return {"state": state_obs, "image": image_obs}
+
+    def _get_image_obs(self) -> np.ndarray:
+        """
+        Render current state as an image observation.
+
+        Returns:
+            image: Image array of shape (C, H, W)
+        """
+        if self.camera_mode == "top_down":
+            image = self._render_top_down()
+        elif self.camera_mode == "agent_centric":
+            image = self._render_agent_centric()
+        elif self.camera_mode == "fixed_3d":
+            image = self._render_3d_view()
+        else:
+            raise ValueError(f"Unknown camera mode: {self.camera_mode}")
+
+        return image
+
+    def _render_top_down(self) -> np.ndarray:
+        """
+        Render top-down 2D view of the environment.
+
+        Returns:
+            image: Rendered image array
+        """
+        fig, ax = plt.subplots(figsize=(4, 4), dpi=self.image_size[0]//4)
+
+        # Set up the plot
+        ax.set_xlim(0, self.world_size[0])
+        ax.set_ylim(0, self.world_size[1])
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        # Background
+        ax.add_patch(patches.Rectangle((0, 0), self.world_size[0], self.world_size[1],
+                                      facecolor='white', edgecolor='black', linewidth=2))
+
+        # Draw agent (circle)
+        position = self.state[:3]
+        agent_circle = patches.Circle((position[0], position[1]), 0.3,
+                                     facecolor='blue', edgecolor='darkblue', linewidth=2)
+        ax.add_patch(agent_circle)
+
+        # Draw velocity vector
+        velocity = self.state[3:6]
+        if np.linalg.norm(velocity[:2]) > 0.01:
+            ax.arrow(position[0], position[1], velocity[0]*0.5, velocity[1]*0.5,
+                    head_width=0.2, head_length=0.1, fc='cyan', ec='cyan', alpha=0.7)
+
+        # Draw goal (star)
+        ax.plot(self.goal[0], self.goal[1], 'g*', markersize=20)
+
+        # Draw goal radius
+        goal_circle = patches.Circle((self.goal[0], self.goal[1]), self.goal_radius,
+                                    facecolor='none', edgecolor='green', linestyle='--', linewidth=1)
+        ax.add_patch(goal_circle)
+
+        # Draw trajectory
+        if len(self.trajectory) > 1:
+            trajectory = np.array(self.trajectory)
+            ax.plot(trajectory[:, 0], trajectory[:, 1], 'b-', alpha=0.3, linewidth=1)
+
+        # Height indicator (color or size based on z)
+        z_normalized = position[2] / self.world_size[2]
+        ax.text(position[0], position[1] - 0.5, f'z:{position[2]:.1f}',
+               fontsize=8, ha='center', alpha=0.7)
+
+        # Convert to image array
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        buf = canvas.buffer_rgba()
+        image = np.frombuffer(buf, dtype=np.uint8)
+        image = image.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+
+        plt.close(fig)
+
+        # Resize to target size
+        from PIL import Image as PILImage
+        pil_image = PILImage.fromarray(image[:, :, :3])  # Remove alpha
+        pil_image = pil_image.resize(self.image_size, PILImage.LANCZOS)
+
+        # Convert to numpy array
+        image = np.array(pil_image)
+
+        # Convert to grayscale if needed
+        if self.grayscale:
+            image = np.mean(image, axis=2, keepdims=False).astype(np.uint8)
+            image = image[np.newaxis, :, :]  # Add channel dimension
+        else:
+            image = image.transpose(2, 0, 1)  # HWC to CHW
+
+        return image.astype(np.float32) / 255.0
+
+    def _render_agent_centric(self) -> np.ndarray:
+        """
+        Render agent-centric view (ego-centric).
+
+        Returns:
+            image: Rendered image array
+        """
+        fig, ax = plt.subplots(figsize=(4, 4), dpi=self.image_size[0]//4)
+
+        # Agent is at the center
+        view_range = 5.0
+        position = self.state[:3]
+
+        # Set up the plot centered on agent
+        ax.set_xlim(position[0] - view_range, position[0] + view_range)
+        ax.set_ylim(position[1] - view_range, position[1] + view_range)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        # Background
+        ax.add_patch(patches.Rectangle((position[0] - view_range, position[1] - view_range),
+                                      2 * view_range, 2 * view_range,
+                                      facecolor='white', edgecolor='gray', linewidth=1))
+
+        # Draw world boundaries if visible
+        if position[0] - view_range < 0:
+            ax.axvline(x=0, color='black', linewidth=2)
+        if position[0] + view_range > self.world_size[0]:
+            ax.axvline(x=self.world_size[0], color='black', linewidth=2)
+        if position[1] - view_range < 0:
+            ax.axhline(y=0, color='black', linewidth=2)
+        if position[1] + view_range > self.world_size[1]:
+            ax.axhline(y=self.world_size[1], color='black', linewidth=2)
+
+        # Draw agent at center
+        agent_circle = patches.Circle((position[0], position[1]), 0.3,
+                                     facecolor='blue', edgecolor='darkblue', linewidth=2)
+        ax.add_patch(agent_circle)
+
+        # Draw velocity vector
+        velocity = self.state[3:6]
+        if np.linalg.norm(velocity[:2]) > 0.01:
+            ax.arrow(position[0], position[1], velocity[0], velocity[1],
+                    head_width=0.2, head_length=0.1, fc='cyan', ec='cyan', alpha=0.7)
+
+        # Draw goal if visible
+        goal_dist = np.linalg.norm(self.goal[:2] - position[:2])
+        if goal_dist < view_range * 1.5:
+            ax.plot(self.goal[0], self.goal[1], 'g*', markersize=20)
+            goal_circle = patches.Circle((self.goal[0], self.goal[1]), self.goal_radius,
+                                        facecolor='none', edgecolor='green', linestyle='--', linewidth=1)
+            ax.add_patch(goal_circle)
+
+        # Draw recent trajectory
+        if len(self.trajectory) > 1:
+            trajectory = np.array(self.trajectory[-20:])  # Last 20 points
+            ax.plot(trajectory[:, 0], trajectory[:, 1], 'b-', alpha=0.3, linewidth=1)
+
+        # Convert to image array
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        buf = canvas.buffer_rgba()
+        image = np.frombuffer(buf, dtype=np.uint8)
+        image = image.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+
+        plt.close(fig)
+
+        # Resize and process
+        from PIL import Image as PILImage
+        pil_image = PILImage.fromarray(image[:, :, :3])
+        pil_image = pil_image.resize(self.image_size, PILImage.LANCZOS)
+        image = np.array(pil_image)
+
+        if self.grayscale:
+            image = np.mean(image, axis=2, keepdims=False).astype(np.uint8)
+            image = image[np.newaxis, :, :]
+        else:
+            image = image.transpose(2, 0, 1)
+
+        return image.astype(np.float32) / 255.0
+
+    def _render_3d_view(self) -> np.ndarray:
+        """
+        Render 3D perspective view.
+
+        Returns:
+            image: Rendered image array
+        """
+        fig = plt.figure(figsize=(4, 4), dpi=self.image_size[0]//4)
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Set view angle
+        ax.view_init(elev=20, azim=45)
+
+        # Plot world boundaries
+        self._plot_box(ax, [0, 0, 0], self.world_size, alpha=0.1)
+
+        # Plot trajectory
+        if len(self.trajectory) > 1:
+            trajectory = np.array(self.trajectory)
+            ax.plot(trajectory[:, 0], trajectory[:, 1], trajectory[:, 2],
+                   'b-', alpha=0.5, linewidth=2)
+
+        # Plot agent
+        position = self.state[:3]
+        ax.scatter(position[0], position[1], position[2],
+                  c='blue', s=100, marker='o')
+
+        # Plot velocity
+        velocity = self.state[3:6]
+        ax.quiver(position[0], position[1], position[2],
+                 velocity[0], velocity[1], velocity[2],
+                 length=0.5, color='cyan', alpha=0.7)
+
+        # Plot goal
+        ax.scatter(self.goal[0], self.goal[1], self.goal[2],
+                  c='green', s=200, marker='*')
+
+        # Goal radius
+        self._plot_sphere(ax, self.goal, self.goal_radius, color='green', alpha=0.2)
+
+        # Remove labels for cleaner image
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.set_zticklabels([])
+        ax.grid(False)
+
+        # Set limits
+        ax.set_xlim([0, self.world_size[0]])
+        ax.set_ylim([0, self.world_size[1]])
+        ax.set_zlim([0, self.world_size[2]])
+
+        # Convert to image
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        buf = canvas.buffer_rgba()
+        image = np.frombuffer(buf, dtype=np.uint8)
+        image = image.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+
+        plt.close(fig)
+
+        # Resize and process
+        from PIL import Image as PILImage
+        pil_image = PILImage.fromarray(image[:, :, :3])
+        pil_image = pil_image.resize(self.image_size, PILImage.LANCZOS)
+        image = np.array(pil_image)
+
+        if self.grayscale:
+            image = np.mean(image, axis=2, keepdims=False).astype(np.uint8)
+            image = image[np.newaxis, :, :]
+        else:
+            image = image.transpose(2, 0, 1)
+
+        return image.astype(np.float32) / 255.0
 
     def render(self, mode: str = "matplotlib", save_path: Optional[str] = None):
         """

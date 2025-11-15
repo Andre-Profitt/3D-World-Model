@@ -27,6 +27,15 @@ ENV_CONFIG = {
     "seed": 42,                        # Random seed for reproducibility
 }
 
+# Visual observation configuration
+VISUAL_CONFIG = {
+    "obs_type": "state",               # "state", "image", or "both"
+    "image_size": (64, 64),           # Image dimensions (H, W)
+    "camera_mode": "top_down",        # "top_down", "agent_centric", "fixed_3d"
+    "grayscale": True,                # Use grayscale images
+    "image_channels": 1,              # 1 for grayscale, 3 for RGB
+}
+
 # Data collection
 DATA_COLLECTION = {
     "num_episodes": 1000,
@@ -74,6 +83,18 @@ MODEL_CONFIG = {
         "predict_delta": True,
         "separate_reward_head": True,
         "beta_recon": 0.1,  # Reconstruction loss weight
+    },
+
+    # Vision encoder for image observations
+    "vision_encoder": {
+        "architecture": "simple",  # "simple" or "resnet"
+        "latent_dim": 32,
+        "channels": [32, 64, 128],
+        "kernel_sizes": [4, 4, 4],
+        "strides": [2, 2, 2],
+        "batch_norm": True,
+        "activation": "relu",
+        "dropout": 0.0,
     },
 }
 
@@ -161,6 +182,9 @@ DATA_PATHS = {
     "train_data": DATA_DIR / "train_data.npz",
     "val_data": DATA_DIR / "val_data.npz",
     "raw_trajectories": DATA_DIR / "raw_trajectories.npz",
+    "visual_data": DATA_DIR / "visual_data.npz",
+    "train_visual_data": DATA_DIR / "train_visual_data.npz",
+    "val_visual_data": DATA_DIR / "val_visual_data.npz",
 }
 
 # Reproducibility
