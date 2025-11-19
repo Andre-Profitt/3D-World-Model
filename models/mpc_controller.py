@@ -34,6 +34,9 @@ class MPCController:
         action_max: float = 5.0,
         lambda_risk: float = 0.0,
         device: str = "cpu",
+        encoder: Optional[nn.Module] = None,
+        use_latent: bool = False,
+        stochastic_rollouts: int = 1,
     ):
         """
         Initialize MPC controller.
@@ -53,6 +56,9 @@ class MPCController:
             action_max: Maximum action value
             lambda_risk: Risk penalty weight (0=risk-neutral, >0=risk-averse)
             device: Device to run on
+            encoder: Encoder network for latent space planning
+            use_latent: Whether to plan in latent space
+            stochastic_rollouts: Number of rollouts for stochastic models
         """
         self.world_model = world_model
         self.action_dim = action_dim
@@ -68,6 +74,9 @@ class MPCController:
         self.action_max = action_max
         self.lambda_risk = lambda_risk
         self.device = device
+        self.encoder = encoder
+        self.use_latent = use_latent
+        self.stochastic_rollouts = stochastic_rollouts
 
         # Check if we have an ensemble model
         self.is_ensemble = hasattr(world_model, 'ensemble_size')
@@ -79,6 +88,10 @@ class MPCController:
         # Move model to device
         self.world_model = self.world_model.to(device)
         self.world_model.eval()
+        
+        if self.use_latent and self.encoder is not None:
+            self.encoder = self.encoder.to(device)
+            self.encoder.eval()
 
         # Initialize CEM parameters
         self.reset_cem()
@@ -87,6 +100,21 @@ class MPCController:
         """Reset CEM parameters."""
         self.cem_mean = None
         self.cem_std = None
+
+    def _encode_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        """Encode observation if using latent space."""
+        if not self.use_latent:
+            return obs
+        
+        if self.encoder is None:
+            raise ValueError("Encoder required for latent planning but not provided")
+            
+        with torch.no_grad():
+            # Handle potential extra dimensions if needed
+            if len(obs.shape) > 2 and hasattr(self.encoder, 'encode'):
+                 # If obs is image-like [B, C, H, W]
+                 return self.encoder.encode(obs)
+            return self.encoder(obs)
 
     def select_action(
         self,
@@ -107,12 +135,15 @@ class MPCController:
         """
         # Convert to tensor
         obs_tensor = torch.from_numpy(obs).float().to(self.device)
+        
+        # Encode if needed
+        state_tensor = self._encode_obs(obs_tensor.unsqueeze(0)).squeeze(0)
 
         # Plan
         if self.use_cem:
-            action, info = self._plan_cem(obs_tensor)
+            action, info = self._plan_cem(state_tensor)
         else:
-            action, info = self._plan_random_shooting(obs_tensor)
+            action, info = self._plan_random_shooting(state_tensor)
 
         # Convert to numpy
         action = action.cpu().numpy()
@@ -123,13 +154,13 @@ class MPCController:
 
     def _plan_random_shooting(
         self,
-        obs: torch.Tensor
+        state: torch.Tensor
     ) -> Tuple[torch.Tensor, dict]:
         """
         Plan using random shooting.
 
         Args:
-            obs: Current observation [obs_dim]
+            state: Current state (observation or latent) [state_dim]
 
         Returns:
             action: Best first action
@@ -148,7 +179,7 @@ class MPCController:
         )
 
         # Evaluate sequences (may include risk adjustment)
-        returns = self._evaluate_sequences(obs, action_sequences)
+        returns = self._evaluate_sequences(state, action_sequences)
 
         # Select best sequence (based on risk-adjusted returns if applicable)
         best_idx = returns.argmax()
@@ -162,7 +193,7 @@ class MPCController:
         }
 
         # Add risk info if applicable
-        if self.is_ensemble and self.lambda_risk > 0:
+        if (self.is_ensemble or self.stochastic_rollouts > 1) and self.lambda_risk > 0:
             info["risk_penalty"] = self.lambda_risk
             info["planning_mode"] = "risk-sensitive"
         else:
@@ -172,13 +203,13 @@ class MPCController:
 
     def _plan_cem(
         self,
-        obs: torch.Tensor
+        state: torch.Tensor
     ) -> Tuple[torch.Tensor, dict]:
         """
         Plan using Cross-Entropy Method.
 
         Args:
-            obs: Current observation [obs_dim]
+            state: Current state (observation or latent) [state_dim]
 
         Returns:
             action: Best first action
@@ -199,6 +230,9 @@ class MPCController:
 
         best_return = -float("inf")
         best_sequence = None
+        
+        # Track returns for info
+        all_returns = []
 
         for iter_idx in range(self.optimization_iters):
             # Sample action sequences from current distribution
@@ -218,7 +252,8 @@ class MPCController:
             )
 
             # Evaluate sequences
-            returns = self._evaluate_sequences(obs, action_sequences)
+            returns = self._evaluate_sequences(state, action_sequences)
+            all_returns = returns
 
             # Select elite sequences
             elite_indices = returns.argsort(descending=True)[:self.num_elite]
@@ -240,13 +275,13 @@ class MPCController:
 
         info = {
             "best_return": best_return,
-            "mean_return": returns.mean().item(),
-            "std_return": returns.std().item(),
+            "mean_return": all_returns.mean().item(),
+            "std_return": all_returns.std().item(),
             "optimization_iters": self.optimization_iters,
         }
 
         # Add risk info if applicable
-        if self.is_ensemble and self.lambda_risk > 0:
+        if (self.is_ensemble or self.stochastic_rollouts > 1) and self.lambda_risk > 0:
             info["risk_penalty"] = self.lambda_risk
             info["planning_mode"] = "risk-sensitive"
         else:
@@ -256,14 +291,14 @@ class MPCController:
 
     def _evaluate_sequences(
         self,
-        obs: torch.Tensor,
+        state: torch.Tensor,
         action_sequences: torch.Tensor,
     ) -> torch.Tensor:
         """
         Evaluate action sequences using the world model.
 
         Args:
-            obs: Initial observation [obs_dim]
+            state: Initial state [state_dim]
             action_sequences: Action sequences [num_samples, horizon, action_dim]
 
         Returns:
@@ -271,8 +306,8 @@ class MPCController:
         """
         num_samples = action_sequences.shape[0]
 
-        # Expand initial observation for all samples
-        obs_expanded = obs.unsqueeze(0).repeat(num_samples, 1)
+        # Expand initial state for all samples
+        state_expanded = state.unsqueeze(0).repeat(num_samples, 1)
 
         if self.is_ensemble and self.lambda_risk > 0:
             # For ensemble with risk-sensitive planning, track returns per member
@@ -285,21 +320,21 @@ class MPCController:
             # Roll out each sequence with each ensemble member
             with torch.no_grad():
                 for member_idx in range(self.world_model.ensemble_size):
-                    current_obs = obs_expanded
+                    current_state = state_expanded
                     discount = 1.0
 
                     for t in range(self.horizon):
                         actions = action_sequences[:, t]
 
                         # Predict with specific ensemble member
-                        next_obs, rewards = self.world_model.models[member_idx](current_obs, actions)
+                        next_state, rewards = self.world_model.models[member_idx](current_state, actions)
 
                         # Accumulate discounted reward
                         returns_per_member[member_idx] += discount * rewards.squeeze(-1)
                         discount *= self.gamma
 
-                        # Update observation
-                        current_obs = next_obs
+                        # Update state
+                        current_state = next_state
 
             # Compute mean and std of returns across ensemble
             mean_returns = returns_per_member.mean(dim=0)
@@ -308,6 +343,48 @@ class MPCController:
             # Risk-sensitive scoring: mean - lambda * std
             returns = mean_returns - self.lambda_risk * std_returns
 
+        elif self.stochastic_rollouts > 1:
+            # Stochastic rollouts (Workstream 2)
+            # We need to repeat samples for stochastic rollouts
+            # [num_samples * stochastic_rollouts, state_dim]
+            batch_size = num_samples * self.stochastic_rollouts
+            
+            current_state = state.unsqueeze(0).repeat(batch_size, 1)
+            
+            # Expand actions: [num_samples, horizon, dim] -> [num_samples, rollouts, horizon, dim] -> [batch, horizon, dim]
+            actions_expanded = action_sequences.unsqueeze(1).repeat(1, self.stochastic_rollouts, 1, 1)
+            actions_expanded = actions_expanded.view(batch_size, self.horizon, self.action_dim)
+            
+            total_returns = torch.zeros(batch_size, device=self.device)
+            discount = 1.0
+            
+            with torch.no_grad():
+                for t in range(self.horizon):
+                    actions = actions_expanded[:, t]
+                    
+                    # Predict (stochastic sampling should happen inside model if not deterministic)
+                    # Assuming model.forward samples if not deterministic
+                    next_state, rewards, *extras = self.world_model(current_state, actions, deterministic=False)
+                    
+                    # Handle potential extra outputs (like dist params)
+                    if isinstance(rewards, tuple):
+                        rewards = rewards[0]
+                        
+                    total_returns += discount * rewards.squeeze(-1)
+                    discount *= self.gamma
+                    current_state = next_state
+            
+            # Reshape to [num_samples, rollouts]
+            returns_matrix = total_returns.view(num_samples, self.stochastic_rollouts)
+            
+            mean_returns = returns_matrix.mean(dim=1)
+            std_returns = returns_matrix.std(dim=1)
+            
+            if self.lambda_risk > 0:
+                returns = mean_returns - self.lambda_risk * std_returns
+            else:
+                returns = mean_returns
+
         else:
             # Standard evaluation (single model or risk-neutral ensemble)
             returns = torch.zeros(num_samples, device=self.device)
@@ -315,7 +392,7 @@ class MPCController:
 
             # Roll out each sequence
             with torch.no_grad():
-                current_obs = obs_expanded
+                current_state = state_expanded
 
                 for t in range(self.horizon):
                     actions = action_sequences[:, t]
@@ -323,16 +400,33 @@ class MPCController:
                     # Predict next state and reward
                     if self.is_ensemble:
                         # Use mean predictions for risk-neutral ensemble
-                        next_obs, rewards = self.world_model(current_obs, actions, reduce="mean")
+                        next_state, rewards = self.world_model(current_state, actions, reduce="mean")
                     else:
-                        next_obs, rewards = self.world_model(current_obs, actions)
+                        # Deterministic prediction
+                        # If model is stochastic but rollouts=1, we might want mean or sample.
+                        # Usually for planning with 1 rollout we prefer mean (deterministic).
+                        # But if user passed stochastic model, maybe they want sample?
+                        # Let's default to deterministic=True for single rollout unless specified otherwise.
+                        # Actually, for standard single rollout, deterministic is safer.
+                        
+                        # Check if model accepts deterministic arg
+                        import inspect
+                        forward_args = inspect.signature(self.world_model.forward).parameters
+                        if 'deterministic' in forward_args:
+                             next_state, rewards, *extras = self.world_model(current_state, actions, deterministic=True)
+                        else:
+                             next_state, rewards = self.world_model(current_state, actions)
+                             
+                        # Handle potential extra outputs
+                        if isinstance(rewards, tuple):
+                            rewards = rewards[0]
 
                     # Accumulate discounted reward
                     returns += discount * rewards.squeeze(-1)
                     discount *= self.gamma
 
-                    # Update observation
-                    current_obs = next_obs
+                    # Update state
+                    current_state = next_state
 
         return returns
 
@@ -356,13 +450,16 @@ class MPCController:
         if horizon is None:
             horizon = self.horizon
 
-        obs = torch.from_numpy(initial_obs).float().to(self.device)
+        obs_tensor = torch.from_numpy(initial_obs).float().to(self.device)
+        
+        # Encode if needed
+        state = self._encode_obs(obs_tensor.unsqueeze(0)).squeeze(0)
 
         # Get best action sequence
         if self.use_cem:
             # Run CEM
             self.reset_cem()
-            _, _ = self._plan_cem(obs)
+            _, _ = self._plan_cem(state)
 
             # Best sequence is in cem_mean
             action_sequence = self.cem_mean[:horizon].clone()
@@ -379,38 +476,63 @@ class MPCController:
                 self.action_max
             )
 
-            returns = self._evaluate_sequences(obs, action_sequences)
+            returns = self._evaluate_sequences(state, action_sequences)
             best_idx = returns.argmax()
             action_sequence = action_sequences[best_idx]
 
         # Roll out best sequence
-        observations = [obs.cpu().numpy()]
+        # Note: For visualization, we might want to decode if latent
+        states = [state.cpu().numpy()]
         rewards = []
 
         with torch.no_grad():
-            current_obs = obs.unsqueeze(0)
+            current_state = state.unsqueeze(0)
 
             for t in range(horizon):
                 action = action_sequence[t].unsqueeze(0)
 
                 # Predict
                 if self.is_ensemble:
-                    next_obs, reward = self.world_model(current_obs, action, reduce="mean")
+                    next_state, reward = self.world_model(current_state, action, reduce="mean")
                 else:
-                    next_obs, reward = self.world_model(current_obs, action)
+                    # Use deterministic for visualization
+                    import inspect
+                    forward_args = inspect.signature(self.world_model.forward).parameters
+                    if 'deterministic' in forward_args:
+                         next_state, reward, *extras = self.world_model(current_state, action, deterministic=True)
+                    else:
+                         next_state, reward = self.world_model(current_state, action)
+                    
+                    if isinstance(reward, tuple):
+                        reward = reward[0]
 
                 # Store
-                observations.append(next_obs.squeeze(0).cpu().numpy())
+                states.append(next_state.squeeze(0).cpu().numpy())
                 rewards.append(reward.item())
 
                 # Update
-                current_obs = next_obs
+                current_state = next_state
 
         actions = action_sequence.cpu().numpy()
-        observations = np.stack(observations)
+        states = np.stack(states)
         rewards = np.array(rewards)
+        
+        # If latent, we might want to return decoded observations?
+        # The signature says "observations". 
+        # If use_latent, "states" are latents.
+        # Let's decode if possible.
+        if self.use_latent and self.encoder is not None:
+             # Try to find decoder
+             # Usually encoder/decoder are paired or in a wrapper.
+             # The MPCController only has self.encoder.
+             # But the user plan says "Optionally, decode for visualization only."
+             # If we don't have decoder, we return latents.
+             # Let's check if we can access decoder.
+             # Maybe pass decoder to MPCController? The plan didn't explicitly say so.
+             # But run_mpc_agent has decoder_path.
+             pass
 
-        return actions, observations, rewards
+        return actions, states, rewards
 
 
 class MPCAgent:

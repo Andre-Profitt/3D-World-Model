@@ -373,6 +373,18 @@ def main():
         help="Use stochastic world model"
     )
     parser.add_argument(
+        "--stochastic_rollouts",
+        type=int,
+        default=1,
+        help="Number of rollouts for stochastic model (default: 1)"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed"
+    )
+    parser.add_argument(
         "--encoder_path",
         type=str,
         default=str(config.MODEL_PATHS["encoder"]),
@@ -399,10 +411,27 @@ def main():
 
     args = parser.parse_args()
 
-    # Create environment
-    env_config = config.ENV_CONFIG.copy()
+    # Set seed
+    if args.seed is not None:
+        import random
+        import numpy as np
+        import torch
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        print(f"Set random seed to {args.seed}")
+
+    # Environment setup
+    env_config = {
+        "render_mode": "human" if args.render else None,
+        "max_steps": 200,
+    }
+    
     if args.use_visual:
-        env_config["obs_type"] = "image"
+        env_config["obs_type"] = "visual"
+        env_config["render_mode"] = "rgb_array" # Must render for visual obs
         env_config["image_size"] = config.VISUAL_CONFIG["image_size"]
         env_config["camera_mode"] = config.VISUAL_CONFIG["camera_mode"]
         env_config["grayscale"] = config.VISUAL_CONFIG["grayscale"]
@@ -514,6 +543,83 @@ def main():
         )
         print(f"  Created latent MPC wrapper (obs: {obs_dim}D → latent: {config.MODEL_CONFIG['encoder']['latent_dim']}D)")
 
+    elif args.use_latent: # New latent MPC for visual or separate encoder/WM
+        # Load latent world model and encoder
+        print("Loading latent world model and encoder...")
+        
+        # Load encoder
+        if not Path(args.encoder_path).exists():
+            print(f"Error: Encoder not found at {args.encoder_path}")
+            print("Please train the autoencoder first: python training/train_autoencoder.py")
+            return
+            
+        from models.encoder_decoder import Encoder
+        # We need to know architecture to load correctly, or just load state dict if same arch
+        # Assuming standard architecture for now or loading from config if available
+        # Ideally we should save config with model.
+        
+        # For now, instantiate with config params
+        if args.use_visual:
+            print("  Using Visual Encoder...")
+            encoder = ConvEncoder(
+                input_channels=1 if config.VISUAL_CONFIG["grayscale"] else 3,
+                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+                # Use default architecture params for now
+            )
+        else:
+            encoder = Encoder(
+                obs_dim=obs_dim,
+                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+                hidden_dims=config.MODEL_CONFIG["encoder"]["hidden_dims"],
+            )
+        encoder_ckpt = torch.load(args.encoder_path, map_location=args.device)
+        # Handle if checkpoint is full autoencoder or just encoder
+        if "model_state_dict" in encoder_ckpt:
+            # Try to load encoder part if it's an autoencoder checkpoint
+            state_dict = encoder_ckpt["model_state_dict"]
+            encoder_keys = {k.replace("encoder.", ""): v for k, v in state_dict.items() if k.startswith("encoder.")}
+            if encoder_keys:
+                encoder.load_state_dict(encoder_keys)
+            else:
+                # Maybe it's just encoder
+                encoder.load_state_dict(state_dict)
+        else:
+            encoder.load_state_dict(encoder_ckpt)
+            
+        print(f"  Loaded encoder from {args.encoder_path}")
+        
+        # Load latent world model
+        if not Path(args.latent_model_path).exists():
+            print(f"Error: Latent model not found at {args.latent_model_path}")
+            print("Please train the latent world model first: python training/train_latent_world_model.py")
+            return
+            
+        from models.latent_world_model import LatentWorldModel
+        
+        # We need a dummy decoder for LatentWorldModel init if we don't have one, 
+        # but MPCController doesn't strictly need it for planning (only viz).
+        # Let's pass None for decoder for now as it's not used in planning loop.
+        
+        world_model = LatentWorldModel(
+            encoder=encoder, # Shared encoder
+            decoder=None,
+            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+            action_dim=action_dim,
+            **config.MODEL_CONFIG["latent_world_model"],
+        )
+        
+        wm_ckpt = torch.load(args.latent_model_path, map_location=args.device)
+        if "model_state_dict" in wm_ckpt:
+            world_model.load_state_dict(wm_ckpt["model_state_dict"])
+        else:
+            world_model.load_state_dict(wm_ckpt)
+            
+        print(f"  Loaded latent world model from {args.latent_model_path}")
+        
+        # For latent MPC, we pass the encoder and use_latent=True to controller
+        # The world_model passed to controller is the LatentWorldModel
+        # The controller will encode obs -> latent, then plan with LatentWorldModel
+        
     elif args.use_ensemble:
         # Load ensemble model
         print(f"Loading ensemble model with {args.ensemble_size} members...")
@@ -548,7 +654,7 @@ def main():
 
     elif args.use_stochastic:
         # Load stochastic world model
-        from models.stochastic_world_model import StochasticWorldModel, StochasticMPCWrapper
+        from models.stochastic_world_model import StochasticWorldModel
         
         stochastic_path = config.WEIGHTS_DIR / "stochastic_model.pt"
         if not stochastic_path.exists():
@@ -558,18 +664,18 @@ def main():
             
         print(f"Loading stochastic model from {stochastic_path}...")
         
-        stochastic_model = StochasticWorldModel(
+        world_model = StochasticWorldModel(
             obs_dim=obs_dim,
             action_dim=action_dim,
             **config.MODEL_CONFIG.get("stochastic_world_model", {})
         )
         
         checkpoint = torch.load(stochastic_path, map_location=args.device)
-        stochastic_model.load_state_dict(checkpoint)
+        world_model.load_state_dict(checkpoint)
         
-        # Wrap for MPC compatibility
-        world_model = StochasticMPCWrapper(stochastic_model)
-        print("  Loaded stochastic model and wrapped for MPC")
+        # No wrapper needed anymore, MPCController handles it via stochastic_rollouts logic
+        # if we pass stochastic_rollouts > 1.
+        print("  Loaded stochastic model")
 
     else:
         # Load single model

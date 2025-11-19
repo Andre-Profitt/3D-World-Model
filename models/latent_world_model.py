@@ -7,6 +7,7 @@ Learns dynamics in the latent space for more efficient planning and generalizati
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 from typing import Optional, Tuple, Dict, List
 
 from .world_model import MLP
@@ -425,3 +426,160 @@ class LatentEnsembleWorldModel(nn.Module):
         if self.decoder is None:
             raise ValueError("No decoder available")
         return self.decoder(latent)
+
+
+class StochasticLatentWorldModel(LatentWorldModel):
+    """
+    Latent world model with stochastic dynamics (Gaussian).
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        decoder: Optional[nn.Module],
+        latent_dim: int,
+        action_dim: int,
+        hidden_dims: List[int] = [128, 128],
+        activation: str = "relu",
+        dropout: float = 0.0,
+        layer_norm: bool = False,
+        predict_delta: bool = True,
+        separate_reward_head: bool = True,
+    ):
+        super().__init__(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=latent_dim,
+            action_dim=action_dim,
+            hidden_dims=hidden_dims,
+            activation=activation,
+            dropout=dropout,
+            layer_norm=layer_norm,
+            predict_delta=predict_delta,
+            separate_reward_head=separate_reward_head,
+        )
+
+        input_dim = latent_dim + action_dim
+
+        # Rebuild dynamics net to output mean and log_std
+        # Output dim is 2 * latent_dim (mean + log_std)
+        self.dynamics_net = MLP(
+            input_dim=input_dim,
+            output_dim=2 * latent_dim,
+            hidden_dims=hidden_dims,
+            activation=activation,
+            dropout=dropout,
+            layer_norm=layer_norm,
+        )
+        
+        # Reward net remains deterministic for now, or could be stochastic too
+        # Keeping reward deterministic as per plan "minimal Gaussian stochastic WM" usually refers to state
+
+    def forward(
+        self,
+        latent: torch.Tensor,
+        action: torch.Tensor,
+        deterministic: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Normal]:
+        """
+        Predict next latent state and reward.
+
+        Args:
+            latent: Current latent state
+            action: Action
+            deterministic: If True, return mean
+
+        Returns:
+            next_latent: Sampled next latent state
+            reward: Predicted reward
+            dist: Distribution over next latent state (or delta)
+        """
+        x = torch.cat([latent, action], dim=-1)
+
+        # Dynamics
+        out = self.dynamics_net(x)
+        mean = out[..., :self.latent_dim]
+        log_std = out[..., self.latent_dim:]
+        
+        # Clamp log_std for stability
+        log_std = torch.clamp(log_std, min=-10.0, max=2.0)
+        std = torch.exp(log_std)
+        
+        dist = Normal(mean, std)
+        
+        if deterministic:
+            sample = mean
+        else:
+            sample = dist.rsample()
+            
+        if self.predict_delta:
+            next_latent = latent + sample
+        else:
+            next_latent = sample
+            
+        # Reward
+        if self.separate_reward_head:
+            reward = self.reward_net(x)
+        else:
+            # If we were using joint net, we'd need to change it too. 
+            # Assuming separate_reward_head=True for stochastic model for simplicity
+            raise NotImplementedError("Stochastic model requires separate_reward_head=True")
+            
+        return next_latent, reward, dist
+
+    def loss(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor,
+        next_obs: torch.Tensor,
+        reward: torch.Tensor,
+        beta_recon: float = 1.0,
+        beta_dynamics: float = 1.0,
+        beta_reward: float = 1.0,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute NLL loss for stochastic model.
+        """
+        latent = self.encode(obs)
+        next_latent_true = self.encode(next_obs)
+        
+        # Forward (deterministic=False doesn't matter for distribution retrieval)
+        next_latent_pred, reward_pred, dist = self.forward(latent, action, deterministic=False)
+        
+        # NLL Loss
+        if self.predict_delta:
+            target = next_latent_true - latent
+        else:
+            target = next_latent_true
+            
+        # Negative Log Likelihood
+        nll = -dist.log_prob(target).sum(dim=-1).mean()
+        
+        # Reward loss (MSE)
+        reward_loss = F.mse_loss(reward_pred, reward.unsqueeze(-1))
+        
+        # Reconstruction loss
+        recon_loss = torch.tensor(0.0, device=obs.device)
+        if self.decoder is not None and beta_recon > 0:
+            # Use mean for reconstruction
+            if self.predict_delta:
+                next_latent_mean = latent + dist.mean
+            else:
+                next_latent_mean = dist.mean
+                
+            obs_recon = self.decode(latent)
+            next_obs_recon = self.decode(next_latent_mean)
+            recon_loss = F.mse_loss(obs_recon, obs) + F.mse_loss(next_obs_recon, next_obs)
+            
+        total_loss = (
+            beta_dynamics * nll +
+            beta_reward * reward_loss +
+            beta_recon * recon_loss
+        )
+        
+        return {
+            "loss": total_loss,
+            "nll_loss": nll,
+            "reward_loss": reward_loss,
+            "recon_loss": recon_loss,
+        }

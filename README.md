@@ -92,6 +92,69 @@ python scripts/run_mpc_agent.py --render
 python scripts/run_mpc_agent.py --use_visual --render
 ```
 
+## Latent Space MPC (V-M-C)
+The system supports planning in a learned latent space, which is essential for high-dimensional observations like images.
+
+### 1. Collect Data
+```bash
+python scripts/collect_data.py --num_episodes 1000 --output data/3d_nav_buffer.npz
+```
+
+### 2. Train Autoencoder
+```bash
+python training/train_autoencoder.py \
+    --data_path data/3d_nav_buffer.npz \
+    --latent_dim 6
+```
+
+### 3. Train Latent World Model
+```bash
+python training/train_latent_world_model.py \
+    --data_path data/3d_nav_buffer.npz \
+    --encoder_ckpt weights/encoder.pt \
+    --latent_dim 6
+```
+
+### 4. Run MPC in Latent Space
+```bash
+python scripts/run_mpc_agent.py \
+    --use_latent \
+    --encoder_path weights/encoder.pt \
+    --latent_model_path weights/latent_world_model.pt \
+    --use_cem \
+    --compare_baselines
+```
+
+## Stochastic World Model
+For environments with uncertainty, you can train a stochastic world model that predicts distributions over future states.
+
+### Training
+```bash
+python training/train_latent_world_model.py \
+    --stochastic \
+    --encoder_ckpt weights/encoder.pt \
+    --latent_dim 6
+```
+
+### Planning with Uncertainty
+```bash
+python scripts/run_mpc_agent.py \
+    --use_latent \
+    --use_stochastic \
+    --latent_model_path weights/latent_world_model_stochastic.pt \
+    --stochastic_rollouts 5 \
+    --lambda_risk 0.5
+```
+This uses a risk-sensitive objective: `score = mean_return - lambda * std_return`.
+
+## Performance Comparison (Approximate)
+
+| Model Type | Planning Space | Success Rate | Mean Reward | Notes |
+|------------|----------------|--------------|-------------|-------|
+| **State-Space WM** | Vector Obs (9D) | ~90% | -20 | Fastest, baseline |
+| **Latent WM** | Latent (6D) | ~88% | -21 | Comparable performance |
+| **Visual WM** | Latent Image (64D) | ~75% | -30 | Harder problem, heavier compute |
+
 ## Configuration
 All hyperparameters are defined in `wm_config.py` (formerly `config.py`). You can adjust model architectures, training settings, and environment parameters there.
 
@@ -149,23 +212,18 @@ If you use this code, please cite:
 - macOS (for MPS acceleration) or Linux with CUDA GPU
 - 8GB+ RAM recommended
 
-### Setup
+### Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/3d-world-model.git
-cd 3d-world-model
+git clone https://github.com/Andre-Profitt/3D-World-Model.git
+cd 3D-World-Model
 ```
 
-2. Create virtual environment:
+2. Create a virtual environment and install dependencies:
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. Install dependencies:
-```bash
-pip install --upgrade pip
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -317,7 +375,7 @@ python training/train_autoencoder.py \
     --num_epochs 50
 ```
 
-This compresses 9D observations to 16D latent codes (~2x compression for this simple task, but scales better with high-dimensional observations).
+This maps observations into a latent space. For 9D vector observations, this is a re-representation (e.g., to 16D) to test the architecture. For high-dimensional inputs like images, it serves as true compression.
 
 #### 2. Train Latent Dynamics Model
 

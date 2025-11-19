@@ -423,8 +423,30 @@ def main():
         default=config.DEVICE_CONFIG["device"],
         help="Device to train on"
     )
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="Train stochastic world model"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed"
+    )
 
     args = parser.parse_args()
+
+    # Set seed
+    if args.seed is not None:
+        import random
+        import numpy as np
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        print(f"Set random seed to {args.seed}")
 
     # Check if encoder/decoder exist
     if not Path(args.encoder_path).exists():
@@ -448,6 +470,7 @@ def main():
 
     # Create encoder/decoder
     from models import Encoder, Decoder
+    from models.latent_world_model import LatentWorldModel, LatentEnsembleWorldModel, StochasticLatentWorldModel
 
     encoder = Encoder(
         obs_dim=obs_dim,
@@ -508,6 +531,18 @@ def main():
             latent_dim=latent_dim,
             action_dim=action_dim,
             ensemble_size=args.ensemble_size,
+            hidden_dims=[128, 128],
+            activation="relu",
+            predict_delta=True,
+            separate_reward_head=True,
+        )
+    elif args.stochastic:
+        print("\nCreating stochastic latent world model...")
+        model = StochasticLatentWorldModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=latent_dim,
+            action_dim=action_dim,
             hidden_dims=[128, 128],
             activation="relu",
             predict_delta=True,
