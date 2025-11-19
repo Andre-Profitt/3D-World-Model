@@ -18,8 +18,8 @@ from tqdm import tqdm
 from envs import Simple3DNavEnv
 from models import (
     WorldModel, EnsembleWorldModel, MPCController, MPCAgent,
-    Encoder, Decoder, LatentWorldModel, LatentMPCWrapper,
-    ConvEncoder, ConvDecoder
+    Encoder, Decoder, LatentWorldModel, LatentEnsembleWorldModel, StochasticLatentWorldModel,
+    ConvEncoder, ConvDecoder, StochasticWorldModel
 )
 import wm_config as config
 
@@ -441,6 +441,9 @@ def main():
     # Get dimensions
     obs_dim = env.observation_space_shape[0]
     action_dim = env.action_space_shape[0]
+    
+    encoder = None
+    world_model = None
 
     # Create and load world model
     if args.use_latent:
@@ -453,20 +456,23 @@ def main():
             print("Please train the autoencoder first: python training/train_autoencoder.py")
             return
 
-        encoder = Encoder(
-            obs_dim=obs_dim,
-            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
-            hidden_dims=config.MODEL_CONFIG["encoder"]["hidden_dims"],
-        )
+        # Determine latent dim from config or checkpoint
+        latent_dim = config.MODEL_CONFIG["encoder"]["latent_dim"]
         
         if args.use_visual:
             print("  Using Visual Encoder...")
             encoder = ConvEncoder(
                 input_channels=1 if config.VISUAL_CONFIG["grayscale"] else 3,
-                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+                latent_dim=latent_dim,
                 # Use default architecture params for now
             )
-            
+        else:
+            encoder = Encoder(
+                obs_dim=obs_dim,
+                latent_dim=latent_dim,
+                hidden_dims=config.MODEL_CONFIG["encoder"]["hidden_dims"],
+            )
+        
         encoder_checkpoint = torch.load(args.encoder_path, map_location=args.device)
         if isinstance(encoder_checkpoint, dict) and "model_state_dict" in encoder_checkpoint:
             encoder.load_state_dict(encoder_checkpoint["model_state_dict"])
@@ -474,152 +480,36 @@ def main():
             encoder.load_state_dict(encoder_checkpoint)
         print(f"  Loaded encoder from {args.encoder_path}")
 
-        # Load decoder
-        if not Path(args.decoder_path).exists():
-            print(f"Error: Decoder not found at {args.decoder_path}")
-            print("Please train the autoencoder first: python training/train_autoencoder.py")
-            return
-
-        decoder = Decoder(
-            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
-            obs_dim=obs_dim,
-            hidden_dims=config.MODEL_CONFIG["decoder"]["hidden_dims"],
-        )
-        
-        if args.use_visual:
-            print("  Using Visual Decoder...")
-            decoder = ConvDecoder(
-                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
-                output_channels=1 if config.VISUAL_CONFIG["grayscale"] else 3,
-                # Use default architecture params for now
-            )
-            
-        decoder_checkpoint = torch.load(args.decoder_path, map_location=args.device)
-        if isinstance(decoder_checkpoint, dict) and "model_state_dict" in decoder_checkpoint:
-            decoder.load_state_dict(decoder_checkpoint["model_state_dict"])
-        else:
-            decoder.load_state_dict(decoder_checkpoint)
-        print(f"  Loaded decoder from {args.decoder_path}")
-
         # Load latent world model
         if not Path(args.latent_model_path).exists():
             print(f"Error: Latent model not found at {args.latent_model_path}")
             print("Please train the latent model first: python training/train_latent_world_model.py")
             return
 
-        # Create latent world model with encoder/decoder
-        latent_config = {k: v for k, v in config.MODEL_CONFIG["latent_world_model"].items()
-                        if k != "beta_recon"}
-        latent_model = LatentWorldModel(
-            encoder=encoder,
-            decoder=decoder,
-            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
-            action_dim=action_dim,
-            **latent_config,
-        )
+        if args.use_stochastic:
+            print("  Using Stochastic Latent World Model...")
+            latent_model = StochasticLatentWorldModel(
+                latent_dim=latent_dim,
+                action_dim=action_dim,
+                **config.MODEL_CONFIG["latent_world_model"],
+            )
+        else:
+            latent_model = LatentWorldModel(
+                latent_dim=latent_dim,
+                action_dim=action_dim,
+                **config.MODEL_CONFIG["latent_world_model"],
+            )
 
-        # Load only the dynamics and reward networks from checkpoint
+        # Load checkpoint
         checkpoint = torch.load(args.latent_model_path, map_location=args.device)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            # Extract only dynamics and reward network weights
-            state_dict = checkpoint["model_state_dict"]
-            dynamics_state = {k.replace("dynamics_net.", ""): v for k, v in state_dict.items() if k.startswith("dynamics_net.")}
-            reward_state = {k.replace("reward_net.", ""): v for k, v in state_dict.items() if k.startswith("reward_net.")}
-
-            # Load into the model
-            latent_model.dynamics_net.load_state_dict(dynamics_state)
-            if hasattr(latent_model, 'reward_net') and latent_model.separate_reward_head:
-                latent_model.reward_net.load_state_dict(reward_state)
+            latent_model.load_state_dict(checkpoint["model_state_dict"])
         else:
             latent_model.load_state_dict(checkpoint)
         print(f"  Loaded latent model from {args.latent_model_path}")
+        
+        world_model = latent_model
 
-        # Create wrapper
-        world_model = LatentMPCWrapper(
-            encoder=encoder,
-            decoder=decoder,
-            latent_world_model=latent_model,
-            device=torch.device(args.device),
-        )
-        print(f"  Created latent MPC wrapper (obs: {obs_dim}D → latent: {config.MODEL_CONFIG['encoder']['latent_dim']}D)")
-
-    elif args.use_latent: # New latent MPC for visual or separate encoder/WM
-        # Load latent world model and encoder
-        print("Loading latent world model and encoder...")
-        
-        # Load encoder
-        if not Path(args.encoder_path).exists():
-            print(f"Error: Encoder not found at {args.encoder_path}")
-            print("Please train the autoencoder first: python training/train_autoencoder.py")
-            return
-            
-        from models.encoder_decoder import Encoder
-        # We need to know architecture to load correctly, or just load state dict if same arch
-        # Assuming standard architecture for now or loading from config if available
-        # Ideally we should save config with model.
-        
-        # For now, instantiate with config params
-        if args.use_visual:
-            print("  Using Visual Encoder...")
-            encoder = ConvEncoder(
-                input_channels=1 if config.VISUAL_CONFIG["grayscale"] else 3,
-                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
-                # Use default architecture params for now
-            )
-        else:
-            encoder = Encoder(
-                obs_dim=obs_dim,
-                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
-                hidden_dims=config.MODEL_CONFIG["encoder"]["hidden_dims"],
-            )
-        encoder_ckpt = torch.load(args.encoder_path, map_location=args.device)
-        # Handle if checkpoint is full autoencoder or just encoder
-        if "model_state_dict" in encoder_ckpt:
-            # Try to load encoder part if it's an autoencoder checkpoint
-            state_dict = encoder_ckpt["model_state_dict"]
-            encoder_keys = {k.replace("encoder.", ""): v for k, v in state_dict.items() if k.startswith("encoder.")}
-            if encoder_keys:
-                encoder.load_state_dict(encoder_keys)
-            else:
-                # Maybe it's just encoder
-                encoder.load_state_dict(state_dict)
-        else:
-            encoder.load_state_dict(encoder_ckpt)
-            
-        print(f"  Loaded encoder from {args.encoder_path}")
-        
-        # Load latent world model
-        if not Path(args.latent_model_path).exists():
-            print(f"Error: Latent model not found at {args.latent_model_path}")
-            print("Please train the latent world model first: python training/train_latent_world_model.py")
-            return
-            
-        from models.latent_world_model import LatentWorldModel
-        
-        # We need a dummy decoder for LatentWorldModel init if we don't have one, 
-        # but MPCController doesn't strictly need it for planning (only viz).
-        # Let's pass None for decoder for now as it's not used in planning loop.
-        
-        world_model = LatentWorldModel(
-            encoder=encoder, # Shared encoder
-            decoder=None,
-            latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
-            action_dim=action_dim,
-            **config.MODEL_CONFIG["latent_world_model"],
-        )
-        
-        wm_ckpt = torch.load(args.latent_model_path, map_location=args.device)
-        if "model_state_dict" in wm_ckpt:
-            world_model.load_state_dict(wm_ckpt["model_state_dict"])
-        else:
-            world_model.load_state_dict(wm_ckpt)
-            
-        print(f"  Loaded latent world model from {args.latent_model_path}")
-        
-        # For latent MPC, we pass the encoder and use_latent=True to controller
-        # The world_model passed to controller is the LatentWorldModel
-        # The controller will encode obs -> latent, then plan with LatentWorldModel
-        
     elif args.use_ensemble:
         # Load ensemble model
         print(f"Loading ensemble model with {args.ensemble_size} members...")
@@ -653,9 +543,7 @@ def main():
             print(f"Warning: Only {members_loaded}/{args.ensemble_size} members loaded")
 
     elif args.use_stochastic:
-        # Load stochastic world model
-        from models.stochastic_world_model import StochasticWorldModel
-        
+        # Load stochastic world model (state space)
         stochastic_path = config.WEIGHTS_DIR / "stochastic_model.pt"
         if not stochastic_path.exists():
             print(f"Error: Stochastic model not found at {stochastic_path}")
@@ -672,9 +560,6 @@ def main():
         
         checkpoint = torch.load(stochastic_path, map_location=args.device)
         world_model.load_state_dict(checkpoint)
-        
-        # No wrapper needed anymore, MPCController handles it via stochastic_rollouts logic
-        # if we pass stochastic_rollouts > 1.
         print("  Loaded stochastic model")
 
     else:
@@ -712,6 +597,10 @@ def main():
         action_max=env.max_acceleration,
         lambda_risk=args.lambda_risk,
         device=args.device,
+        encoder=encoder,
+        use_latent=args.use_latent,
+        stochastic_rollouts=args.stochastic_rollouts,
+        use_stochastic=args.use_stochastic,
     )
 
     # Create agent
@@ -727,6 +616,12 @@ def main():
     print(f"Planning method: {'CEM' if args.use_cem else 'Random Shooting'}")
     print(f"Horizon: {args.horizon}")
     print(f"Samples: {args.num_samples}")
+    if args.use_latent:
+        print("Mode: Latent Space MPC")
+    elif args.use_stochastic:
+        print(f"Mode: Stochastic MPC (Rollouts: {args.stochastic_rollouts})")
+    else:
+        print("Mode: Standard State Space MPC")
 
     # Evaluate MPC agent
     print("\nEvaluating MPC agent...")
@@ -798,14 +693,11 @@ def main():
 
         # Improvement
         print("\nMPC Improvement over Random:")
-        print(f"  Reward:  {mpc_stats['mean_reward'] - random_stats['mean_reward']:+.2f}")
-        print(f"  Success: {(mpc_stats['success_rate'] - random_stats['success_rate']) * 100:+.1f}%")
-
-    # Visualize planning
-    if args.visualize_planning:
-        print("\nVisualizing planning...")
-        visualize_planning(env, controller, num_steps=5)
-        print(f"Saved planning visualizations to {config.LOGS_DIR}")
+        if random_stats['mean_reward'] != 0:
+            imp = (mpc_stats['mean_reward'] - random_stats['mean_reward']) / abs(random_stats['mean_reward']) * 100
+            print(f"  Reward: {imp:+.1f}%")
+        else:
+            print("  Reward: N/A")
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ class MPCController:
         encoder: Optional[nn.Module] = None,
         use_latent: bool = False,
         stochastic_rollouts: int = 1,
+        use_stochastic: bool = False,
     ):
         """
         Initialize MPC controller.
@@ -59,6 +60,7 @@ class MPCController:
             encoder: Encoder network for latent space planning
             use_latent: Whether to plan in latent space
             stochastic_rollouts: Number of rollouts for stochastic models
+            use_stochastic: Whether to use stochastic sampling for planning
         """
         self.world_model = world_model
         self.action_dim = action_dim
@@ -77,6 +79,7 @@ class MPCController:
         self.encoder = encoder
         self.use_latent = use_latent
         self.stochastic_rollouts = stochastic_rollouts
+        self.use_stochastic = use_stochastic
 
         # Check if we have an ensemble model
         self.is_ensemble = hasattr(world_model, 'ensemble_size')
@@ -193,7 +196,7 @@ class MPCController:
         }
 
         # Add risk info if applicable
-        if (self.is_ensemble or self.stochastic_rollouts > 1) and self.lambda_risk > 0:
+        if (self.is_ensemble or self.use_stochastic) and self.lambda_risk > 0:
             info["risk_penalty"] = self.lambda_risk
             info["planning_mode"] = "risk-sensitive"
         else:
@@ -281,7 +284,7 @@ class MPCController:
         }
 
         # Add risk info if applicable
-        if (self.is_ensemble or self.stochastic_rollouts > 1) and self.lambda_risk > 0:
+        if (self.is_ensemble or self.use_stochastic) and self.lambda_risk > 0:
             info["risk_penalty"] = self.lambda_risk
             info["planning_mode"] = "risk-sensitive"
         else:
@@ -343,7 +346,7 @@ class MPCController:
             # Risk-sensitive scoring: mean - lambda * std
             returns = mean_returns - self.lambda_risk * std_returns
 
-        elif self.stochastic_rollouts > 1:
+        elif self.use_stochastic:
             # Stochastic rollouts (Workstream 2)
             # We need to repeat samples for stochastic rollouts
             # [num_samples * stochastic_rollouts, state_dim]
@@ -363,8 +366,17 @@ class MPCController:
                     actions = actions_expanded[:, t]
                     
                     # Predict (stochastic sampling should happen inside model if not deterministic)
-                    # Assuming model.forward samples if not deterministic
-                    next_state, rewards, *extras = self.world_model(current_state, actions, deterministic=False)
+                    # Assuming model.forward samples if sample=True
+                    # Check signature of forward
+                    import inspect
+                    forward_args = inspect.signature(self.world_model.forward).parameters
+                    if 'sample' in forward_args:
+                         next_state, rewards, *extras = self.world_model(current_state, actions, sample=True)
+                    elif 'deterministic' in forward_args:
+                         next_state, rewards, *extras = self.world_model(current_state, actions, deterministic=False)
+                    else:
+                         # Fallback for models that don't support explicit sampling control
+                         next_state, rewards = self.world_model(current_state, actions)
                     
                     # Handle potential extra outputs (like dist params)
                     if isinstance(rewards, tuple):
@@ -403,16 +415,14 @@ class MPCController:
                         next_state, rewards = self.world_model(current_state, actions, reduce="mean")
                     else:
                         # Deterministic prediction
-                        # If model is stochastic but rollouts=1, we might want mean or sample.
-                        # Usually for planning with 1 rollout we prefer mean (deterministic).
-                        # But if user passed stochastic model, maybe they want sample?
-                        # Let's default to deterministic=True for single rollout unless specified otherwise.
-                        # Actually, for standard single rollout, deterministic is safer.
+                        # If model is stochastic but use_stochastic=False, we want mean (deterministic).
                         
-                        # Check if model accepts deterministic arg
+                        # Check if model accepts deterministic/sample arg
                         import inspect
                         forward_args = inspect.signature(self.world_model.forward).parameters
-                        if 'deterministic' in forward_args:
+                        if 'sample' in forward_args:
+                             next_state, rewards, *extras = self.world_model(current_state, actions, sample=False)
+                        elif 'deterministic' in forward_args:
                              next_state, rewards, *extras = self.world_model(current_state, actions, deterministic=True)
                         else:
                              next_state, rewards = self.world_model(current_state, actions)
@@ -481,7 +491,6 @@ class MPCController:
             action_sequence = action_sequences[best_idx]
 
         # Roll out best sequence
-        # Note: For visualization, we might want to decode if latent
         states = [state.cpu().numpy()]
         rewards = []
 
@@ -498,7 +507,9 @@ class MPCController:
                     # Use deterministic for visualization
                     import inspect
                     forward_args = inspect.signature(self.world_model.forward).parameters
-                    if 'deterministic' in forward_args:
+                    if 'sample' in forward_args:
+                         next_state, reward, *extras = self.world_model(current_state, action, sample=False)
+                    elif 'deterministic' in forward_args:
                          next_state, reward, *extras = self.world_model(current_state, action, deterministic=True)
                     else:
                          next_state, reward = self.world_model(current_state, action)
@@ -517,21 +528,6 @@ class MPCController:
         states = np.stack(states)
         rewards = np.array(rewards)
         
-        # If latent, we might want to return decoded observations?
-        # The signature says "observations". 
-        # If use_latent, "states" are latents.
-        # Let's decode if possible.
-        if self.use_latent and self.encoder is not None:
-             # Try to find decoder
-             # Usually encoder/decoder are paired or in a wrapper.
-             # The MPCController only has self.encoder.
-             # But the user plan says "Optionally, decode for visualization only."
-             # If we don't have decoder, we return latents.
-             # Let's check if we can access decoder.
-             # Maybe pass decoder to MPCController? The plan didn't explicitly say so.
-             # But run_mpc_agent has decoder_path.
-             pass
-
         return actions, states, rewards
 
 

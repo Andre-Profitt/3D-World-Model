@@ -21,7 +21,7 @@ import argparse
 from typing import Dict, Optional
 
 from models import Encoder, Decoder
-from models.latent_world_model import LatentWorldModel, LatentEnsembleWorldModel
+from models.latent_world_model import LatentWorldModel, LatentEnsembleWorldModel, StochasticLatentWorldModel
 # Import local config directly
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wm_config as project_config
@@ -75,7 +75,7 @@ class LatentTransitionDataset(Dataset):
         self.rewards = rewards
         self.dones = dones
 
-        # Store original observations for reconstruction loss
+        # Store original observations for reconstruction loss (unused now but kept for reference)
         self.observations = observations
         self.next_observations = next_observations
 
@@ -110,7 +110,6 @@ class LatentWorldModelTrainer:
         weight_decay: float = 1e-5,
         gradient_clip: float = 1.0,
         use_tensorboard: bool = True,
-        beta_recon: float = 0.1,
         beta_dynamics: float = 1.0,
         beta_reward: float = 1.0,
     ):
@@ -126,7 +125,6 @@ class LatentWorldModelTrainer:
             weight_decay: Weight decay
             gradient_clip: Gradient clipping value
             use_tensorboard: Whether to log to tensorboard
-            beta_recon: Weight for reconstruction loss
             beta_dynamics: Weight for dynamics loss
             beta_reward: Weight for reward loss
         """
@@ -137,20 +135,12 @@ class LatentWorldModelTrainer:
         self.gradient_clip = gradient_clip
 
         # Loss weights
-        self.beta_recon = beta_recon
         self.beta_dynamics = beta_dynamics
         self.beta_reward = beta_reward
 
-        # Optimizer (only optimize dynamics networks, not encoder/decoder)
-        dynamics_params = []
-        for name, param in self.model.named_parameters():
-            if "encoder" not in name and "decoder" not in name:
-                dynamics_params.append(param)
-
-        print(f"Optimizing {len(dynamics_params)} parameter groups (excluding encoder/decoder)")
-
+        # Optimizer
         self.optimizer = optim.AdamW(
-            dynamics_params,
+            self.model.parameters(),
             lr=lr,
             weight_decay=weight_decay
         )
@@ -176,26 +166,23 @@ class LatentWorldModelTrainer:
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Train for one epoch."""
         self.model.train()
-        self.model.set_encoder_decoder_freeze(True)  # Freeze encoder/decoder
 
         total_loss = 0
         total_dynamics_loss = 0
         total_reward_loss = 0
-        total_recon_loss = 0
         num_batches = 0
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]")
         for batch_idx, batch in enumerate(pbar):
             # Move to device
-            obs = batch["obs"].to(self.device)
+            latent = batch["latent"].to(self.device)
             action = batch["action"].to(self.device)
-            next_obs = batch["next_obs"].to(self.device)
+            next_latent = batch["next_latent"].to(self.device)
             reward = batch["reward"].to(self.device)
 
             # Forward pass and compute loss
             losses = self.model.loss(
-                obs, action, next_obs, reward,
-                beta_recon=self.beta_recon,
+                latent, action, next_latent, reward,
                 beta_dynamics=self.beta_dynamics,
                 beta_reward=self.beta_reward,
             )
@@ -215,9 +202,12 @@ class LatentWorldModelTrainer:
 
             # Track losses
             total_loss += losses["loss"].item()
-            total_dynamics_loss += losses["dynamics_loss"].item()
+            if "dynamics_loss" in losses:
+                total_dynamics_loss += losses["dynamics_loss"].item()
+            elif "nll_loss" in losses:
+                total_dynamics_loss += losses["nll_loss"].item()
+                
             total_reward_loss += losses["reward_loss"].item()
-            total_recon_loss += losses["recon_loss"].item()
             num_batches += 1
 
             # Update progress bar
@@ -231,15 +221,16 @@ class LatentWorldModelTrainer:
             if self.use_tensorboard and batch_idx % 10 == 0:
                 global_step = epoch * len(self.train_loader) + batch_idx
                 self.writer.add_scalar("train/loss", losses["loss"], global_step)
-                self.writer.add_scalar("train/dynamics_loss", losses["dynamics_loss"], global_step)
+                if "dynamics_loss" in losses:
+                    self.writer.add_scalar("train/dynamics_loss", losses["dynamics_loss"], global_step)
+                elif "nll_loss" in losses:
+                    self.writer.add_scalar("train/nll_loss", losses["nll_loss"], global_step)
                 self.writer.add_scalar("train/reward_loss", losses["reward_loss"], global_step)
-                self.writer.add_scalar("train/recon_loss", losses["recon_loss"], global_step)
 
         return {
             "loss": total_loss / num_batches,
             "dynamics_loss": total_dynamics_loss / num_batches,
             "reward_loss": total_reward_loss / num_batches,
-            "recon_loss": total_recon_loss / num_batches,
         }
 
     def validate(self, epoch: int) -> Dict[str, float]:
@@ -249,37 +240,36 @@ class LatentWorldModelTrainer:
         total_loss = 0
         total_dynamics_loss = 0
         total_reward_loss = 0
-        total_recon_loss = 0
         num_batches = 0
 
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]"):
                 # Move to device
-                obs = batch["obs"].to(self.device)
+                latent = batch["latent"].to(self.device)
                 action = batch["action"].to(self.device)
-                next_obs = batch["next_obs"].to(self.device)
+                next_latent = batch["next_latent"].to(self.device)
                 reward = batch["reward"].to(self.device)
 
                 # Forward pass
                 losses = self.model.loss(
-                    obs, action, next_obs, reward,
-                    beta_recon=self.beta_recon,
+                    latent, action, next_latent, reward,
                     beta_dynamics=self.beta_dynamics,
                     beta_reward=self.beta_reward,
                 )
 
                 # Track losses
                 total_loss += losses["loss"].item()
-                total_dynamics_loss += losses["dynamics_loss"].item()
+                if "dynamics_loss" in losses:
+                    total_dynamics_loss += losses["dynamics_loss"].item()
+                elif "nll_loss" in losses:
+                    total_dynamics_loss += losses["nll_loss"].item()
                 total_reward_loss += losses["reward_loss"].item()
-                total_recon_loss += losses["recon_loss"].item()
                 num_batches += 1
 
         metrics = {
             "loss": total_loss / num_batches,
             "dynamics_loss": total_dynamics_loss / num_batches,
             "reward_loss": total_reward_loss / num_batches,
-            "recon_loss": total_recon_loss / num_batches,
         }
 
         # Log to tensorboard
@@ -287,7 +277,6 @@ class LatentWorldModelTrainer:
             self.writer.add_scalar("val/loss", metrics["loss"], epoch)
             self.writer.add_scalar("val/dynamics_loss", metrics["dynamics_loss"], epoch)
             self.writer.add_scalar("val/reward_loss", metrics["reward_loss"], epoch)
-            self.writer.add_scalar("val/recon_loss", metrics["recon_loss"], epoch)
 
         return metrics
 
@@ -358,10 +347,18 @@ class LatentWorldModelTrainer:
             "action_dim": self.model.action_dim,
         }
 
-        if is_best:
-            path = config.WEIGHTS_DIR / "best_latent_world_model.pt"
+        # Determine filename based on model type
+        if isinstance(self.model, StochasticLatentWorldModel):
+            filename = "latent_world_model_stochastic.pt"
+            best_filename = "best_latent_world_model_stochastic.pt"
         else:
-            path = config.WEIGHTS_DIR / "latent_world_model.pt"
+            filename = "latent_world_model.pt"
+            best_filename = "best_latent_world_model.pt"
+
+        if is_best:
+            path = config.WEIGHTS_DIR / best_filename
+        else:
+            path = config.WEIGHTS_DIR / filename
 
         torch.save(checkpoint, path)
         print(f"  Saved checkpoint to {path}")
@@ -404,7 +401,7 @@ def main():
         "--beta_recon",
         type=float,
         default=0.1,
-        help="Weight for reconstruction loss"
+        help="Weight for reconstruction loss (deprecated)"
     )
     parser.add_argument(
         "--use_ensemble",
@@ -454,24 +451,16 @@ def main():
         print("Please train the autoencoder first: python training/train_autoencoder.py")
         return
 
-    if not Path(args.decoder_path).exists():
-        print(f"Error: Decoder not found at {args.decoder_path}")
-        print("Please train the autoencoder first: python training/train_autoencoder.py")
-        return
-
-    # Load encoder and decoder
-    print("Loading encoder and decoder...")
+    # Load encoder (needed for dataset creation)
+    print("Loading encoder...")
     encoder_checkpoint = torch.load(args.encoder_path, map_location=args.device)
-    decoder_checkpoint = torch.load(args.decoder_path, map_location=args.device)
-
+    
     obs_dim = encoder_checkpoint["obs_dim"]
     latent_dim = encoder_checkpoint["latent_dim"]
     action_dim = 3  # From environment
 
-    # Create encoder/decoder
-    from models import Encoder, Decoder
-    from models.latent_world_model import LatentWorldModel, LatentEnsembleWorldModel, StochasticLatentWorldModel
-
+    # Create encoder
+    from models import Encoder
     encoder = Encoder(
         obs_dim=obs_dim,
         latent_dim=latent_dim,
@@ -481,16 +470,7 @@ def main():
     )
     encoder.load_state_dict(encoder_checkpoint["model_state_dict"])
 
-    decoder = Decoder(
-        latent_dim=latent_dim,
-        obs_dim=obs_dim,
-        hidden_dims=[128, 128],
-        activation="relu",
-        layer_norm=True,
-    )
-    decoder.load_state_dict(decoder_checkpoint["model_state_dict"])
-
-    print(f"Loaded encoder/decoder (obs_dim={obs_dim}, latent_dim={latent_dim})")
+    print(f"Loaded encoder (obs_dim={obs_dim}, latent_dim={latent_dim})")
 
     # Create datasets with pre-encoded latents
     print("\nCreating datasets...")
@@ -526,8 +506,6 @@ def main():
     if args.use_ensemble:
         print(f"\nCreating ensemble latent world model with {args.ensemble_size} members...")
         model = LatentEnsembleWorldModel(
-            encoder=encoder,
-            decoder=decoder,
             latent_dim=latent_dim,
             action_dim=action_dim,
             ensemble_size=args.ensemble_size,
@@ -539,8 +517,6 @@ def main():
     elif args.stochastic:
         print("\nCreating stochastic latent world model...")
         model = StochasticLatentWorldModel(
-            encoder=encoder,
-            decoder=decoder,
             latent_dim=latent_dim,
             action_dim=action_dim,
             hidden_dims=[128, 128],
@@ -551,8 +527,6 @@ def main():
     else:
         print("\nCreating latent world model...")
         model = LatentWorldModel(
-            encoder=encoder,
-            decoder=decoder,
             latent_dim=latent_dim,
             action_dim=action_dim,
             hidden_dims=[128, 128],
@@ -578,7 +552,6 @@ def main():
         weight_decay=1e-5,
         gradient_clip=1.0,
         use_tensorboard=config.EXPERIMENT_CONFIG["use_tensorboard"],
-        beta_recon=args.beta_recon,
         beta_dynamics=1.0,
         beta_reward=1.0,
     )
