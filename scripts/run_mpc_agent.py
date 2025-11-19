@@ -368,6 +368,11 @@ def main():
         help="Use visual observations (images)"
     )
     parser.add_argument(
+        "--use_stochastic",
+        action="store_true",
+        help="Use stochastic world model"
+    )
+    parser.add_argument(
         "--encoder_path",
         type=str,
         default=str(config.MODEL_PATHS["encoder"]),
@@ -540,6 +545,31 @@ def main():
 
         if members_loaded < args.ensemble_size:
             print(f"Warning: Only {members_loaded}/{args.ensemble_size} members loaded")
+
+    elif args.use_stochastic:
+        # Load stochastic world model
+        from models.stochastic_world_model import StochasticWorldModel, StochasticMPCWrapper
+        
+        stochastic_path = config.WEIGHTS_DIR / "stochastic_model.pt"
+        if not stochastic_path.exists():
+            print(f"Error: Stochastic model not found at {stochastic_path}")
+            print("Please train the stochastic model first: python training/train_stochastic_model.py")
+            return
+            
+        print(f"Loading stochastic model from {stochastic_path}...")
+        
+        stochastic_model = StochasticWorldModel(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            **config.MODEL_CONFIG.get("stochastic_world_model", {})
+        )
+        
+        checkpoint = torch.load(stochastic_path, map_location=args.device)
+        stochastic_model.load_state_dict(checkpoint)
+        
+        # Wrap for MPC compatibility
+        world_model = StochasticMPCWrapper(stochastic_model)
+        print("  Loaded stochastic model and wrapped for MPC")
 
     else:
         # Load single model

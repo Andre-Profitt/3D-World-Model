@@ -16,6 +16,17 @@ A complete implementation of a 3D world model with Model Predictive Control (MPC
     - **Risk-Sensitive Planning**: Avoids uncertain regions using ensemble variance.
 - **Evaluation Suite**: Comprehensive tools for measuring planning horizon and reconstruction quality.
 
+## State vs Latent Planning
+The system supports planning in both raw state space and learned latent space:
+
+| Feature | Vector State | Latent Space (V-M-C) |
+|---------|--------------|---------------------|
+| **Input** | 9D Vector (Pos, Vel, Goal) | 64x64 Image |
+| **Representation** | Explicit State | Learned 16D Latent |
+| **Dynamics** | MLP | Latent MLP |
+| **Planning** | MPC on State | MPC on Latent |
+| **Use Case** | Low-dim, fully observable | High-dim, visual, partial obs |
+
 ## Architecture
 
 ### Components
@@ -82,7 +93,7 @@ python scripts/run_mpc_agent.py --use_visual --render
 ```
 
 ## Configuration
-All hyperparameters are defined in `wm_config.py`. You can adjust model architectures, training settings, and environment parameters there.
+All hyperparameters are defined in `wm_config.py` (formerly `config.py`). You can adjust model architectures, training settings, and environment parameters there.
 
 ## Project Structure
 - `envs/`: 3D navigation environment.
@@ -93,6 +104,19 @@ All hyperparameters are defined in `wm_config.py`. You can adjust model architec
 - `data/`: Collected trajectories.
 - `weights/`: Saved model checkpoints.
 - `logs/`: Tensorboard logs and experiment results.
+
+## Citation
+If you use this code, please cite:
+```
+@misc{3dworldmodel2024,
+  author = {Andre Profitt},
+  title = {3D World Model with MPC},
+  year = {2024},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/Andre-Profitt/3D-World-Model}},
+}
+```
 
 ```
 3d-world-model/

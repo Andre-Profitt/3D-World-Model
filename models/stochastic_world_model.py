@@ -537,3 +537,20 @@ class StochasticEnsembleWorldModel(nn.Module):
             return (next_obs_mean, rewards_mean), uncertainty_info, dist_params_list
         else:
             raise ValueError(f"Unknown reduce method: {reduce}")
+
+
+class StochasticMPCWrapper(nn.Module):
+    """
+    Wrapper for stochastic world model to work with standard MPC controller.
+    
+    Strips the distribution parameters from the output.
+    """
+    
+    def __init__(self, model: StochasticWorldModel):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, obs: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass returning only next_obs and reward."""
+        next_obs, reward, _ = self.model(obs, action)
+        return next_obs, reward
