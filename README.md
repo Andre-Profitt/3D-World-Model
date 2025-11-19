@@ -131,10 +131,31 @@ python scripts/run_mpc_agent.py \
 ```
 
 ## Stochastic World Model
-For environments with uncertainty, you can train a stochastic world model that predicts distributions over future states.
 
-### Training
+For environments with uncertainty, you can train a stochastic world model that predicts distributions over future states. This is available for both **State Space** and **Latent Space**.
+
+### 1. State-Space Stochastic Model
+
+Train a probabilistic model on raw vector observations:
+
 ```bash
+# Train stochastic model
+python training/train_stochastic_world_model.py \
+    --num_epochs 100 \
+    --batch_size 256
+
+# Train ensemble of stochastic models
+python training/train_stochastic_world_model.py \
+    --use_ensemble \
+    --ensemble_size 5
+```
+
+### 2. Latent-Space Stochastic Model
+
+Train a probabilistic model in the learned latent space:
+
+```bash
+# Train stochastic latent model
 python training/train_latent_world_model.py \
     --stochastic \
     --encoder_path weights/encoder.pt \
@@ -142,16 +163,30 @@ python training/train_latent_world_model.py \
     --latent_dim 6
 ```
 
-### Planning with Uncertainty
+### 3. Planning with Uncertainty
+
+Run MPC with stochastic rollouts. The planner samples multiple futures for each action sequence to estimate risk.
+
 ```bash
+# Run MPC with stochastic state-space model
+python scripts/run_mpc_agent.py \
+    --use_stochastic \
+    --stochastic_rollouts 20 \
+    --lambda_risk 1.0
+
+# Run MPC with stochastic latent model
 python scripts/run_mpc_agent.py \
     --use_latent \
     --use_stochastic \
     --latent_model_path weights/latent_world_model_stochastic.pt \
-    --stochastic_rollouts 5 \
-    --lambda_risk 0.5
+    --stochastic_rollouts 20 \
+    --lambda_risk 1.0
 ```
-This uses a risk-sensitive objective: `score = mean_return - lambda * std_return`.
+
+**Key Arguments:**
+- `--use_stochastic`: Enable stochastic model usage.
+- `--stochastic_rollouts N`: Sample N distinct futures for each candidate action sequence (Monte Carlo sampling).
+- `--lambda_risk`: Penalty weight for variance in returns (`score = mean - lambda * std`). Higher values make the agent more risk-averse.
 
 ## Performance Comparison (Approximate)
 
