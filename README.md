@@ -222,6 +222,15 @@ If you use this code, please cite:
 }
 ```
 
+## Reproducibility
+
+To ensure reproducible results, all training and evaluation scripts support a `--seed` argument. This sets the random seed for Python, NumPy, and PyTorch.
+
+```bash
+# Example: Train with a specific seed
+python training/train_world_model.py --seed 42
+```
+
 ## License
 
 MIT License - see LICENSE file for details.

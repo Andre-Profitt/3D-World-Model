@@ -469,8 +469,26 @@ def main():
         default=str(config.MODEL_PATHS["world_model"]),
         help="Path to save model"
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed"
+    )
 
     args = parser.parse_args()
+
+    # Set seed
+    if args.seed is not None:
+        import random
+        import numpy as np
+        import torch
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        print(f"Set random seed to {args.seed}")
 
     # Load data
     print("Loading data...")
