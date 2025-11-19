@@ -18,9 +18,10 @@ from tqdm import tqdm
 from envs import Simple3DNavEnv
 from models import (
     WorldModel, EnsembleWorldModel, MPCController, MPCAgent,
-    Encoder, Decoder, LatentWorldModel, LatentMPCWrapper
+    Encoder, Decoder, LatentWorldModel, LatentMPCWrapper,
+    ConvEncoder, ConvDecoder
 )
-import config
+import wm_config as config
 
 
 def evaluate_agent(
@@ -362,6 +363,11 @@ def main():
         help="Use latent world model (V-M-C architecture)"
     )
     parser.add_argument(
+        "--use_visual",
+        action="store_true",
+        help="Use visual observations (images)"
+    )
+    parser.add_argument(
         "--encoder_path",
         type=str,
         default=str(config.MODEL_PATHS["encoder"]),
@@ -389,7 +395,14 @@ def main():
     args = parser.parse_args()
 
     # Create environment
-    env = Simple3DNavEnv(**config.ENV_CONFIG)
+    env_config = config.ENV_CONFIG.copy()
+    if args.use_visual:
+        env_config["obs_type"] = "image"
+        env_config["image_size"] = config.VISUAL_CONFIG["image_size"]
+        env_config["camera_mode"] = config.VISUAL_CONFIG["camera_mode"]
+        env_config["grayscale"] = config.VISUAL_CONFIG["grayscale"]
+        
+    env = Simple3DNavEnv(**env_config)
 
     # Get dimensions
     obs_dim = env.observation_space_shape[0]
@@ -411,6 +424,15 @@ def main():
             latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
             hidden_dims=config.MODEL_CONFIG["encoder"]["hidden_dims"],
         )
+        
+        if args.use_visual:
+            print("  Using Visual Encoder...")
+            encoder = ConvEncoder(
+                input_channels=1 if config.VISUAL_CONFIG["grayscale"] else 3,
+                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+                # Use default architecture params for now
+            )
+            
         encoder_checkpoint = torch.load(args.encoder_path, map_location=args.device)
         if isinstance(encoder_checkpoint, dict) and "model_state_dict" in encoder_checkpoint:
             encoder.load_state_dict(encoder_checkpoint["model_state_dict"])
@@ -429,6 +451,15 @@ def main():
             obs_dim=obs_dim,
             hidden_dims=config.MODEL_CONFIG["decoder"]["hidden_dims"],
         )
+        
+        if args.use_visual:
+            print("  Using Visual Decoder...")
+            decoder = ConvDecoder(
+                latent_dim=config.MODEL_CONFIG["encoder"]["latent_dim"],
+                output_channels=1 if config.VISUAL_CONFIG["grayscale"] else 3,
+                # Use default architecture params for now
+            )
+            
         decoder_checkpoint = torch.load(args.decoder_path, map_location=args.device)
         if isinstance(decoder_checkpoint, dict) and "model_state_dict" in decoder_checkpoint:
             decoder.load_state_dict(decoder_checkpoint["model_state_dict"])

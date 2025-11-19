@@ -10,10 +10,9 @@ from .encoder_decoder import (
 from .latent_world_model import LatentWorldModel, LatentEnsembleWorldModel
 from .latent_mpc_wrapper import LatentMPCWrapper
 from .vision_encoder import (
-    VisionEncoder,
-    VisionDecoder,
-    ResNetVisionEncoder,
-    create_vision_encoder,
+    ConvEncoder,
+    ConvDecoder,
+    create_visual_encoder_decoder_pair,
 )
 from .stochastic_world_model import (
     StochasticWorldModel,
@@ -52,10 +51,9 @@ __all__ = [
     "LatentWorldModel",
     "LatentEnsembleWorldModel",
     "LatentMPCWrapper",
-    "VisionEncoder",
-    "VisionDecoder",
-    "ResNetVisionEncoder",
-    "create_vision_encoder",
+    "ConvEncoder",
+    "ConvDecoder",
+    "create_visual_encoder_decoder_pair",
     "StochasticWorldModel",
     "StochasticEnsembleWorldModel",
     "StochasticMLP",

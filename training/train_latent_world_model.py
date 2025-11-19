@@ -24,7 +24,7 @@ from models import Encoder, Decoder
 from models.latent_world_model import LatentWorldModel, LatentEnsembleWorldModel
 # Import local config directly
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config as project_config
+import wm_config as project_config
 config = project_config
 
 

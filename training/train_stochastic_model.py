@@ -20,7 +20,7 @@ import json
 from typing import Dict, Tuple
 
 from models import StochasticWorldModel, StochasticEnsembleWorldModel
-import config
+import wm_config as config
 
 
 def load_data(data_path: Path) -> Tuple[np.ndarray, ...]:

@@ -21,7 +21,7 @@ import argparse
 from typing import Dict, Tuple
 
 from models import WorldModel, EnsembleWorldModel
-import config
+import wm_config as config
 
 
 class TransitionDataset(Dataset):
@@ -47,12 +47,74 @@ class TransitionDataset(Dataset):
         return len(self.observations)
 
     def __getitem__(self, idx):
+        # Return a single transition
         return {
             "obs": self.observations[idx],
             "action": self.actions[idx],
             "next_obs": self.next_observations[idx],
             "reward": self.rewards[idx],
             "done": self.dones[idx],
+        }
+
+class SequenceDataset(Dataset):
+    """Dataset for multi-step world model training."""
+    
+    def __init__(self, data_path: str, seq_len: int = 10):
+        """
+        Initialize dataset.
+        
+        Args:
+            data_path: Path to .npz file
+            seq_len: Length of sequences to return
+        """
+        data = np.load(data_path)
+        self.observations = torch.from_numpy(data["observations"]).float()
+        self.actions = torch.from_numpy(data["actions"]).float()
+        self.rewards = torch.from_numpy(data["rewards"]).float()
+        self.dones = torch.from_numpy(data["dones"]).float()
+        
+        self.seq_len = seq_len
+        
+        # Pre-compute valid start indices
+        # A start index is valid if the sequence doesn't cross episode boundaries (done=True)
+        self.valid_indices = []
+        total_len = len(self.observations)
+        
+        # This is a bit slow for large datasets, but safe
+        # Assuming data is stored as [ep1_t1, ep1_t2, ..., ep1_done, ep2_t1, ...]
+        # We check if any 'done' flag appears in the sequence (except possibly the last step)
+        
+        # Faster way: identify episode boundaries
+        # done_indices = np.where(data["dones"])[0]
+        # But let's stick to a simple loop for now or just random sampling during training if dataset is huge.
+        # Given the data size, we can probably iterate.
+        
+        for i in range(total_len - seq_len):
+            # Check if any step in the sequence (except the last) is terminal
+            # If i+k is terminal, then i+k+1 belongs to next episode.
+            # So we can't have a transition from i+k to i+k+1.
+            # We need obs[i]...obs[i+seq_len] to be in same episode.
+            # dones[j] being true means transition j -> j+1 is valid but j+1 is terminal state (or start of next?)
+            # Usually done[t] corresponds to transition (s_t, a_t) -> s_{t+1}. If done[t] is true, s_{t+1} is terminal.
+            # So we can use up to the step where done is True.
+            
+            # If any done in [i, i+seq_len-2] is True, then the sequence is broken.
+            if not torch.any(self.dones[i:i+seq_len-1]):
+                self.valid_indices.append(i)
+                
+        print(f"Found {len(self.valid_indices)} valid sequences of length {seq_len}")
+
+    def __len__(self):
+        return len(self.valid_indices)
+
+    def __getitem__(self, idx):
+        start_idx = self.valid_indices[idx]
+        end_idx = start_idx + self.seq_len
+        
+        return {
+            "obs_seq": self.observations[start_idx:end_idx],
+            "action_seq": self.actions[start_idx:end_idx], # Note: last action might not be useful if we don't have next obs
+            "reward_seq": self.rewards[start_idx:end_idx],
         }
 
 
@@ -133,13 +195,22 @@ class WorldModelTrainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]")
         for batch_idx, batch in enumerate(pbar):
             # Move to device
-            obs = batch["obs"].to(self.device)
-            action = batch["action"].to(self.device)
-            next_obs = batch["next_obs"].to(self.device)
-            reward = batch["reward"].to(self.device)
-
             # Forward pass
-            losses = self.model.loss(obs, action, next_obs, reward)
+            if "obs_seq" in batch:
+                # Multi-step loss
+                obs_seq = batch["obs_seq"].to(self.device)
+                action_seq = batch["action_seq"].to(self.device)
+                reward_seq = batch["reward_seq"].to(self.device)
+                
+                losses = self.model.unrolled_loss(obs_seq, action_seq, reward_seq, unroll_steps=5)
+            else:
+                # Single-step loss
+                obs = batch["obs"].to(self.device)
+                action = batch["action"].to(self.device)
+                next_obs = batch["next_obs"].to(self.device)
+                reward = batch["reward"].to(self.device)
+                
+                losses = self.model.loss(obs, action, next_obs, reward)
 
             # Backward pass
             self.optimizer.zero_grad()
@@ -199,13 +270,22 @@ class WorldModelTrainer:
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]"):
                 # Move to device
-                obs = batch["obs"].to(self.device)
-                action = batch["action"].to(self.device)
-                next_obs = batch["next_obs"].to(self.device)
-                reward = batch["reward"].to(self.device)
-
                 # Forward pass
-                losses = self.model.loss(obs, action, next_obs, reward)
+                if "obs_seq" in batch:
+                    # Multi-step loss
+                    obs_seq = batch["obs_seq"].to(self.device)
+                    action_seq = batch["action_seq"].to(self.device)
+                    reward_seq = batch["reward_seq"].to(self.device)
+                    
+                    losses = self.model.unrolled_loss(obs_seq, action_seq, reward_seq, unroll_steps=5)
+                else:
+                    # Single-step loss
+                    obs = batch["obs"].to(self.device)
+                    action = batch["action"].to(self.device)
+                    next_obs = batch["next_obs"].to(self.device)
+                    reward = batch["reward"].to(self.device)
+                    
+                    losses = self.model.loss(obs, action, next_obs, reward)
 
                 # Track losses
                 total_loss += losses["loss"].item()
@@ -342,6 +422,11 @@ def main():
         default=config.DEVICE_CONFIG["device"],
         help="Device to train on"
     )
+    parser.add_argument(
+        "--use_multistep",
+        action="store_true",
+        help="Use multi-step training loss"
+    )
 
     args = parser.parse_args()
 
@@ -352,8 +437,13 @@ def main():
         return
 
     # Create datasets
-    train_dataset = TransitionDataset(config.DATA_PATHS["train_data"])
-    val_dataset = TransitionDataset(config.DATA_PATHS["val_data"])
+    if args.use_multistep:
+        print("Using SequenceDataset for multi-step training")
+        train_dataset = SequenceDataset(config.DATA_PATHS["train_data"], seq_len=10)
+        val_dataset = SequenceDataset(config.DATA_PATHS["val_data"], seq_len=10)
+    else:
+        train_dataset = TransitionDataset(config.DATA_PATHS["train_data"])
+        val_dataset = TransitionDataset(config.DATA_PATHS["val_data"])
 
     # Create data loaders
     train_loader = DataLoader(
@@ -374,8 +464,12 @@ def main():
 
     # Get dimensions from dataset
     sample = train_dataset[0]
-    obs_dim = sample["obs"].shape[0]
-    action_dim = sample["action"].shape[0]
+    if args.use_multistep:
+        obs_dim = sample["obs_seq"].shape[1]
+        action_dim = sample["action_seq"].shape[1]
+    else:
+        obs_dim = sample["obs"].shape[0]
+        action_dim = sample["action"].shape[0]
 
     print(f"Observation dimension: {obs_dim}")
     print(f"Action dimension: {action_dim}")

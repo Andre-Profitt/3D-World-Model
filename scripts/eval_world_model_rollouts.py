@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple
 
 from envs import Simple3DNavEnv
 from models import WorldModel, EnsembleWorldModel
-import config
+import wm_config as config
 
 
 class WorldModelEvaluator:

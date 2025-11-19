@@ -227,6 +227,93 @@ class WorldModel(nn.Module):
             "reward_loss": reward_loss,
         }
 
+    def unrolled_loss(
+        self,
+        obs_seq: torch.Tensor,
+        action_seq: torch.Tensor,
+        reward_seq: torch.Tensor,
+        start_step: int = 0,
+        unroll_steps: int = 5,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute loss over a multi-step horizon (autoregressive).
+
+        Args:
+            obs_seq: Sequence of observations [batch_size, seq_len, obs_dim]
+            action_seq: Sequence of actions [batch_size, seq_len, action_dim]
+            reward_seq: Sequence of rewards [batch_size, seq_len, 1]
+            start_step: Step to start unrolling from
+            unroll_steps: Number of steps to unroll
+
+        Returns:
+            Dictionary of losses
+        """
+        batch_size, seq_len, _ = obs_seq.shape
+        
+        # Ensure we have enough steps
+        end_step = min(start_step + unroll_steps, seq_len - 1)
+        actual_unroll_steps = end_step - start_step
+        
+        if actual_unroll_steps <= 0:
+            return {"loss": torch.tensor(0.0, device=obs_seq.device), 
+                    "state_loss": torch.tensor(0.0, device=obs_seq.device),
+                    "reward_loss": torch.tensor(0.0, device=obs_seq.device)}
+
+        total_state_loss = 0
+        total_reward_loss = 0
+        
+        # Initial state
+        current_obs = obs_seq[:, start_step]
+        
+        for t in range(actual_unroll_steps):
+            # Get action for current step
+            action = action_seq[:, start_step + t]
+            
+            # Target next state and reward
+            target_next_obs = obs_seq[:, start_step + t + 1]
+            target_reward = reward_seq[:, start_step + t]
+            
+            # Predict
+            next_obs_pred, reward_pred = self.forward(current_obs, action)
+            
+            # Compute losses
+            if self.predict_delta:
+                delta_true = target_next_obs - current_obs
+                delta_pred = next_obs_pred - current_obs
+                # Note: We use the *predicted* current_obs for delta calculation if t > 0
+                # But wait, delta_true should be target_next - target_current? 
+                # No, if we are unrolling, we want next_obs_pred to match target_next_obs.
+                # If predict_delta is True, the model outputs a delta.
+                # The reconstructed next_obs_pred is current_obs + delta_pred.
+                # We want this to match target_next_obs.
+                # So MSE(next_obs_pred, target_next_obs) is correct.
+                # However, for stability, sometimes it's better to supervise the delta directly against 
+                # (target_next_obs - target_current_obs). 
+                # But here current_obs is the *predicted* state from previous step (except at t=0).
+                # So we should just compare the absolute states.
+                step_state_loss = F.mse_loss(next_obs_pred, target_next_obs, reduction='none')
+            else:
+                step_state_loss = F.mse_loss(next_obs_pred, target_next_obs, reduction='none')
+                
+            step_reward_loss = F.mse_loss(reward_pred, target_reward.unsqueeze(-1), reduction='none')
+            
+            total_state_loss += step_state_loss.mean()
+            total_reward_loss += step_reward_loss.mean()
+            
+            # Update current observation for next step (autoregressive)
+            current_obs = next_obs_pred
+            
+        # Average over steps
+        avg_state_loss = total_state_loss / actual_unroll_steps
+        avg_reward_loss = total_reward_loss / actual_unroll_steps
+        total_loss = avg_state_loss + avg_reward_loss
+        
+        return {
+            "loss": total_loss,
+            "state_loss": avg_state_loss,
+            "reward_loss": avg_reward_loss,
+        }
+
     def imagine_trajectory(
         self,
         initial_obs: torch.Tensor,

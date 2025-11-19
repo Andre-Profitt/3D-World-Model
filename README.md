@@ -2,13 +2,19 @@
 
 A complete implementation of a 3D world model with Model Predictive Control (MPC) for navigation tasks. The system learns environmental dynamics from experience and uses the learned model for planning optimal trajectories.
 
-## Overview
+## Features
 
-This project demonstrates:
-- **3D Physics Simulation**: Custom 3D navigation environment with realistic physics
-- **World Model Learning**: Neural network that predicts next states and rewards
-- **Model-Based Planning**: MPC controller that plans actions by simulating futures
-- **End-to-End Pipeline**: From data collection to trained agent evaluation
+- **3D Physics Simulation**: Built on PyBullet for realistic rigid body dynamics.
+- **World Model Learning**:
+    - **Vector State**: MLP-based dynamics model.
+    - **Visual Observations**: CNN-based encoder/decoder for learning from pixels.
+    - **Latent Dynamics**: V-M-C architecture (Vision-Model-Controller) planning in latent space.
+    - **Ensemble Models**: Uncertainty estimation using bootstrap ensembles.
+    - **Stochastic Dynamics**: Probabilistic modeling (Gaussian/GMM) for aleatoric uncertainty.
+- **Model-Based Planning**:
+    - **MPC Controller**: Model Predictive Control with Random Shooting and CEM.
+    - **Risk-Sensitive Planning**: Avoids uncertain regions using ensemble variance.
+- **Evaluation Suite**: Comprehensive tools for measuring planning horizon and reconstruction quality.
 
 ## Architecture
 
@@ -29,7 +35,64 @@ This project demonstrates:
    - Evaluates action sequences using the world model
    - Receding horizon control
 
+## Quick Start
+
+### 1. Installation
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Run an Experiment
+The easiest way to get started is to run a full experiment pipeline:
+
+```bash
+# Run a standard vector-state experiment
+python experiments/run_experiment.py --name demo_vector --mode vector
+
+# Run a visual world model experiment
+python experiments/run_experiment.py --name demo_visual --mode visual
+```
+
+### 3. Manual Workflow
+
+**Data Collection**
+```bash
+python scripts/collect_data.py --num_episodes 50
+```
+
+**Training**
+```bash
+# Train standard world model
+python training/train_world_model.py
+
+# Train with multi-step loss
+python training/train_world_model.py --use_multistep
+
+# Train visual world model
+python training/train_visual_world_model.py
+```
+
+**Evaluation**
+```bash
+# Evaluate MPC agent
+python scripts/run_mpc_agent.py --render
+
+# Evaluate visual agent
+python scripts/run_mpc_agent.py --use_visual --render
+```
+
+## Configuration
+All hyperparameters are defined in `wm_config.py`. You can adjust model architectures, training settings, and environment parameters there.
+
 ## Project Structure
+- `envs/`: 3D navigation environment.
+- `models/`: Neural network architectures (WorldModel, Encoder, Decoder, etc.).
+- `training/`: Training scripts.
+- `scripts/`: Data collection and evaluation scripts.
+- `experiments/`: Experiment runners and configurations.
+- `data/`: Collected trajectories.
+- `weights/`: Saved model checkpoints.
+- `logs/`: Tensorboard logs and experiment results.
 
 ```
 3d-world-model/

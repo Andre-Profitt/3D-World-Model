@@ -14,7 +14,7 @@ from tqdm import tqdm
 import argparse
 
 from envs import Simple3DNavEnv
-import config
+import wm_config as config
 
 
 class DataCollector:
